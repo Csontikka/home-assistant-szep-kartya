@@ -1,105 +1,91 @@
-# OTP SZÉP Kártya Home Assistant component
+# OTP SZÉP Kártya – Home Assistant integráció
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 
-Custom component for [Home Assistant](https://home-assistant.io) that tracks the balance of an OTP SZÉP Kártya.
+Az OTP SZÉP Kártya egyenlegét mutatja Home Assistantban, zsebenként. Több kártyát is kezel, és a beállítás a felületen történik.
 
-This is a fork of [ofalvai/home-assistant-szep-kartya](https://github.com/ofalvai/home-assistant-szep-kartya), which has not been updated since January 2023. The fork keeps the component working against the current OTP portal.
+Ez az [ofalvai/home-assistant-szep-kartya](https://github.com/ofalvai/home-assistant-szep-kartya) forkja. Az eredeti 2023 januárja óta nem változott; a fork a mai OTP portálhoz igazodik.
 
-![Screenshot](screenshot.png?raw=true)
+![Képernyőkép](screenshot.png?raw=true)
 
-## What is different from upstream
+## Telepítés
 
-- **Current portal endpoint.** The balance comes from the portal's quick balance query (`/ajax/gyorsegyenleg/`), which needs the full 16-digit card number. The old `/ajax/egyenleglekerdezes/` endpoint is gone.
-- **Both pockets.** A separate sensor for the Aktív Magyarok pocket, from the same query.
-- **The sensor survives a failed query.** Upstream ran the first query during platform setup. If the portal answered with anything unexpected, setup failed, Home Assistant never retried it, and the sensor disappeared until the next restart. Here the entities are always created, a failed query keeps the previous balance, and the last balance is restored after a restart.
-- **Portal errors are understood.** A rejected card code, or a blocked or virtual card, stops polling at the first answer and raises a repair issue, so a wrong card code is not retried until the card gets locked. The portal sometimes answers `nincs_kartya` for a working card after frequent queries, so for a card that worked before that reason stops polling only after 3 answers in a row, counted across restarts. Captchas and rejections make the next query wait (8 hours, doubling up to a day). Temporary portal outages are just logged.
-- **Gentle on the portal.** At least 15 minutes between queries, and the query history is restored after a restart, so a burst of Home Assistant restarts sends one query, not one per restart.
-- **Safer handling of the card data.** An invalid `card_number` or `card_code` is reported in the log and as a repair issue without the value. Numbers are masked in logged responses, the unique ID only uses the last 4 digits of the card, and requests do not follow redirects.
-- **Proper sensor entities.** Monetary device class with long-term statistics, and a unique ID, so the sensors can be renamed in the UI.
-- **Defaults and limits.** Polling defaults to every 4 hours instead of 30 seconds, requests time out after 30 seconds, and responses are capped in size. No extra Python requirements.
+1. Telepítsd a [HACS](https://hacs.xyz/)-t.
+2. HACS › *Custom repositories*: `https://github.com/Csontikka/home-assistant-szep-kartya`, típus: *Integration*.
+3. Telepítsd a *SZÉP Kártya* integrációt, majd indítsd újra a Home Assistantot.
+4. *Beállítások › Eszközök és szolgáltatások › Integráció hozzáadása › SZÉP Kártya*.
 
-## Installation
+Kártyánként add meg:
 
-1. Install [HACS](https://hacs.xyz/)
-2. Add this repository to HACS as a custom repository of type *Integration*: `https://github.com/Csontikka/home-assistant-szep-kartya`
-3. Install *OTP SZÉP Kártya* from HACS
-4. Add the YAML config to `configuration.yaml` (see below)
-5. Restart Home Assistant
+- **Név**: az eszköz neve, például a kártya tulajdonosa. Ebből lesznek az entitásnevek.
+- **Kártyaszám**: a teljes, 16 jegyű szám (szóköz és kötőjel megengedett).
+- **Telekód**: háromjegyű, alapértelmezetten a kártyaszám utolsó 3 számjegye.
 
-### Switching from the upstream repository
+Hozzáadáskor egyszer lekérdezzük az egyenleget, így azonnal kiderül, ha valami el van gépelve. Ugyanazt a kártyát kétszer nem lehet felvenni.
 
-1. Note your YAML config, it is not touched by HACS.
-2. In HACS, remove the `ofalvai/home-assistant-szep-kartya` custom repository first.
-3. Add this repository and download the latest release.
-4. Check that `custom_components/szep_kartya/manifest.json` shows this repository in `documentation` and the new version.
-5. If `card_number` still holds only the last 8 digits, change it to the full 16-digit number.
-6. Restart Home Assistant.
+**Beállítások** (az integráció *Konfigurálás* gombja): a lekérdezés gyakorisága, 1 és 24 óra között, alapból 4 óra.
 
-Removing the old repository after downloading the new one can delete the freshly downloaded files, because both install into the same `custom_components/szep_kartya` folder. That is why the order above matters.
+## Entitások kártyánként
 
-## Configuration
-
-``` yaml
-sensor:
-  - platform: szep_kartya
-    card_number: !secret szep_kartya_card_number
-    card_code: !secret szep_kartya_card_code
-    name: SZÉP Kártya
-    scan_interval:
-      hours: 4
-```
-
-`card_number`: The full 16-digit card number. Quote it in `secrets.yaml` so leading zeroes are kept.
-
-`card_code`: "Telekód" (by default the last 3 digits of the card number). Quote it as well.
-
-`name` (optional): Friendly name of the sensor.
-
-`scan_interval` (optional): Defaults to 4 hours. Do not go much lower: the portal asks for a captcha when it is queried too often, and the sensor cannot solve it. Queries are at least 15 minutes apart, so a shorter interval or a manual `homeassistant.update_entity` within 15 minutes of the last query does nothing.
-
-If `card_number` or `card_code` is invalid, the sensor is not set up, and the log and a repair issue say which one without showing the value. Older versions of this component let Home Assistant put the value into the log in that case, so check old logs before sharing them.
-
-## The sensors
-
-One query per polling round feeds both sensors:
-
-| Sensor | Portal field | Pocket |
-|---|---|---|
-| `sensor.szep_kartya` (named after `name`) | `szamla_osszeg9` | Szálláshely zseb. Since 2023 the former Vendéglátás and Szabadidő pockets are merged here. |
-| `sensor.szep_kartya_aktiv_magyarok` | `szamla_osszeg8` | Aktív Magyarok zseb |
-
-The field mapping comes from the labels on the portal's own balance page. The entity IDs above follow the default `name`.
-
-The unique IDs are built from the last 4 digits of the card. After a card replacement with new last digits, Home Assistant creates new entities (for example `sensor.szep_kartya_2`); remove the old ones in *Settings > Entities* and rename the new ones.
-
-Attributes:
-
-- `last_success`: time of the last successful query.
-- `last_attempt`: time of the last query, successful or not.
-- `last_error`: the last error, cleared by the next successful query.
-- `not_before`: set while a captcha or card rejection makes the next query wait, cleared when the next query is sent.
-- `rejections`: card rejections in a row, reset by a successful query.
-- `polling_stopped`: `true` after the portal rejected the card for good (see the repair issue).
-- `stale`: `true` when there was no successful query in the last 48 hours. `last_success` is restored after a restart; `stale` is also `true` when no successful query is known at all.
-- `Egyenleg` (main sensor only): the balance as text, kept for compatibility with upstream.
-
-A failed query keeps the last balance, and the last balance is restored after a restart, so automations that compare old and new states do not see a fake drop to `unavailable` or `unknown` and back. Use `stale` or `last_success` to notice a long outage. The sensors are only unavailable when the portal rejected the card and there is no balance to show.
-
-`last_success` changes with every successful query. A state trigger without `to:` also fires on attribute changes, so an automation meant for balance changes should compare `trigger.from_state.state` and `trigger.to_state.state`.
-
-## Troubleshooting
-
-All messages are logged under `custom_components.szep_kartya.sensor`:
-
-| Log message | Meaning |
+| Entitás | Mit mutat |
 |---|---|
-| `Invalid configuration: ...` | `card_number` or `card_code` has the wrong format. Also shown as a repair issue. The sensors are not created until the config is fixed and Home Assistant is restarted. |
-| `Captcha protection kicked in ...; next query not before ...` | The portal was queried too often. The next query waits, no action needed unless it keeps happening. |
-| `The portal rejected the card (nincs_kartya), 1 of 3 in a row; ...` | The card worked before, so this is treated as temporary: the next query waits. Frequent queries (for example many restarts) can cause it. |
-| `The portal rejected the card (...); polling stopped until Home Assistant restarts` | Also shown as a repair issue. `hibas_kartyaszam_vagy_telekod`: check `card_number` and `card_code`. `letiltott_inaktiv_kartya`: the card is blocked or inactive. Fix the config, then restart. |
-| `The portal could not answer the balance query (...)` | Temporary problem on the portal side, e.g. `api_nem_elerheto`. Retried at the next polling round. |
-| `Unexpected balance response (HTTP ...)` | The portal answered with something the component does not know. The start of the response is logged, with long numbers masked. |
-| `Balance update failed: ...` | Network error, HTTP error, or the portal page changed and the `ajax_token` could not be found. |
+| Szálláshely zseb | A `szamla_osszeg9` mező. 2023 óta a korábbi Vendéglátás és Szabadidő zseb is ide van összevonva. |
+| Aktív Magyarok zseb | A `szamla_osszeg8` mező. |
+| Összesen | A két zseb együtt. |
+| Utolsó sikeres lekérdezés | Diagnosztikai időbélyeg. |
+| Lekérdezési probléma | Diagnosztikai bináris szenzor: be van kapcsolva, ha a legutóbbi lekérdezés hibás volt, a lekérdezés leállt, vagy 48 órája nincs friss adat. Attribútumai a részletek. |
 
-In every case the entities stay in place, and the message is also shown in the `last_error` attribute while the sensor is available.
+A mezők jelentése a portál saját egyenleg-oldalának címkéiből származik. A pénzösszeg-szenzoroknak van hosszú távú statisztikája.
+
+A Szálláshely zseb szenzoron megmaradtak az 1.2.x attribútumai (`last_success`, `last_attempt`, `last_error`, `not_before`, `rejections`, `polling_stopped`, `stale`, `Egyenleg`), hogy a meglévő dashboardok és automatizmusok működjenek.
+
+## Hogyan kíméli a portált
+
+A portál a sűrű lekérdezésre captchával válaszol, és ilyenkor működő kártyára is adhat `nincs_kartya` hibát. Ezért:
+
+- Egy kártyát legfeljebb 15 percenként kérdezünk le. Az állapot újraindítás után is megmarad, így egy újraindítás-sorozat egyetlen lekérdezés. A 15 percen belüli kézi frissítés nem csinál semmit.
+- A kártyák lekérdezései sorban mennek, köztük legalább 1 perc szünettel.
+- Captcha után a következő lekérdezés vár: 8 óra, ismétlődésnél duplázódva legfeljebb 24 óra. Ez **minden kártyára** vonatkozik, mert a korlát a közös IP-címet éri.
+- Egy sikertelen lekérdezés nem nullázza az egyenleget, és nem teszi elérhetetlenné a szenzort. Az automatizmusok így nem látnak hamis költést vagy jóváírást.
+
+## Ha a portál elutasítja a kártyát
+
+- `hibas_kartyaszam_vagy_telekod`, `letiltott_inaktiv_kartya`, `virtualis_kartya`: a lekérdezés azonnal leáll, hogy egy rossz telekód ne zárolja a kártyát. A Home Assistant értesítést küld, és a felületen kéri újra a telekódot. Mentés előtt egyszer lekérdezzük az egyenleget.
+- `nincs_kartya`: ha a kártya korábban már működött, átmenetinek vesszük (várakozással), és csak 3 egymás utáni elutasításnál áll le. Ha még sosem működött, azonnal leáll.
+- Minden más portálhiba (pl. `api_nem_elerheto`) átmeneti: naplózzuk, és a következő körben újrapróbáljuk.
+
+A kártyaszám és a telekód nem kerül a naplóba, és a diagnosztikai letöltésből is ki van takarva. A Home Assistant a felületen felvett adatokat a saját tárolójában (`.storage`) tartja, ugyanúgy titkosítatlanul, mint a `secrets.yaml`-t.
+
+## Átállás a régi YAML-konfigurációról
+
+Nincs teendő a frissítés előtt. Az első indításkor a `sensor:` alatti `platform: szep_kartya` blokk magától átkerül a felületre:
+
+- az entitásazonosítók (pl. `sensor.szep_kartya`) és az előzmények megmaradnak, így az automatizmusok változatlanul működnek;
+- az utolsó egyenleg és a lekérdezési előzmény is átjön, tehát a frissítés miatti újraindítás nem küld fölösleges lekérdezést;
+- a `scan_interval` beállítás lesz a lekérdezés gyakorisága (1 és 24 óra közé kerekítve).
+
+Utána egy javítási értesítés jelzi, hogy a YAML-blokk törölhető. A YAML-ből már nem jönnek létre entitások.
+
+A szenzorok megjelenített neve a felületes szerkezethez igazodik (pl. *SZÉP Kártya Szálláshely zseb*); az entitásazonosító nem változik.
+
+## Hibaelhárítás
+
+A naplóüzenetek a `custom_components.szep_kartya` alatt jelennek meg, angolul:
+
+| Üzenet | Jelentés |
+|---|---|
+| `Captcha protection kicked in ...; next query not before ...` | A portál sok kérést kapott. A következő lekérdezés vár, nincs teendő, hacsak nem ismétlődik tartósan. |
+| `The portal rejected the card (nincs_kartya), 1 of 3 in a row; ...` | Korábban működő kártya, átmenetinek vesszük. |
+| `The portal rejected the card (...); polling stopped until the card code is entered again` | Az értesítésben add meg újra a telekódot. |
+| `The portal could not answer the balance query (...)` | Átmeneti portálhiba, a következő körben újrapróbáljuk. |
+| `Unexpected balance response (HTTP ...)` | Ismeretlen válasz; a válasz eleje naplózva, a számok kitakarva. |
+| `Balance update failed: ...` | Hálózati vagy HTTP-hiba, vagy megváltozott a portál oldala. |
+
+## Fejlesztés
+
+A tesztek a Home Assistant 2026.9.2 tesztkörnyezetében futnak (Python 3.14):
+
+```
+pip install pytest-homeassistant-custom-component==0.13.365
+pytest
+```

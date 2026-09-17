@@ -1,402 +1,206 @@
-import json
-import logging
-import re
-import threading
-import time
-from datetime import timedelta
+"""Balance sensors of a SZÉP Kártya, and the import of the old YAML platform."""
 
-import requests
+from __future__ import annotations
+
+import logging
+
 import voluptuous as vol
 
 import homeassistant.helpers.config_validation as cv
 from homeassistant.components.sensor import (
     PLATFORM_SCHEMA,
-    RestoreSensor,
     SensorDeviceClass,
+    SensorEntity,
     SensorStateClass,
 )
-from homeassistant.const import CONF_NAME
+from homeassistant.config_entries import SOURCE_IMPORT
+from homeassistant.const import CONF_NAME, CONF_SCAN_INTERVAL, EntityCategory
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
-from homeassistant.util import dt as dt_util
+from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from . import SzepKartyaConfigEntry
+from .const import (
+    CONF_CARD_CODE,
+    CONF_CARD_NUMBER,
+    CONF_SCAN_HOURS,
+    DEFAULT_NAME,
+    DEFAULT_SCAN_HOURS,
+    DOMAIN,
+    ISSUE_DEPRECATED_YAML,
+    ISSUE_INVALID_YAML,
+    POCKET_ACCOMMODATION,
+    POCKET_ACTIVE_HUNGARIANS,
+)
+from .coordinator import SzepKartyaCoordinator
+from .portal import is_valid_card_code, is_valid_card_number
 
 _LOGGER = logging.getLogger(__name__)
 
-DOMAIN = 'szep_kartya'
-
-CONF_CARD_NUMBER = 'card_number'
-CONF_CARD_CODE = 'card_code'
-
-DEFAULT_NAME = 'SZÉP Kártya'
-DEFAULT_UNIT = 'Ft'
-DEFAULT_ICON = 'mdi:credit-card-outline'
-
-# The portal asks for a captcha when polled often. Used when the YAML config
-# has no scan_interval; the sensor platform default would be 30 seconds.
-SCAN_INTERVAL = timedelta(hours=4)
-
-URL_HTML = 'https://magan.szepkartya.otpportalok.hu/fooldal/'
-URL_API = 'https://magan.szepkartya.otpportalok.hu/ajax/gyorsegyenleg/'
-REQUEST_TIMEOUT = 30
-REQUEST_DEADLINE = 60
-MAX_RESPONSE_BYTES = 2 * 1024 * 1024
-
-# Minimum gap between two queries. Both sensors of a polling round share one
-# query, and a burst of Home Assistant restarts sends only one (the last attempt
-# is restored). Frequent queries make the portal answer with captchas and even
-# with card errors for a working card.
-MIN_QUERY_GAP = timedelta(minutes=15)
-# After a captcha or a card error the next query waits at least this long,
-# doubling up to a day.
-CAPTCHA_BACKOFF_START = timedelta(hours=8)
-CAPTCHA_BACKOFF_MAX = timedelta(hours=24)
-# No successful query for this long sets the 'stale' attribute.
-STALE_AFTER = timedelta(hours=48)
-
-# 'HI' reasons that blame the card. Retrying a wrong card code risks locking the
-# card, so polling stops at the first of these.
-CARD_REASONS = {
-    'hibas_kartyaszam_vagy_telekod',
-    'letiltott_inaktiv_kartya',
-    'nincs_kartya',
-    'virtualis_kartya',
-}
-# The portal has also answered nincs_kartya for a working card right after a
-# burst of queries. For a card that had a successful query before, this reason
-# only stops polling after REJECTION_LIMIT answers in a row (the count survives
-# restarts).
-TOLERATED_REASONS = {'nincs_kartya'}
-CAPTCHA_REASONS = {'hibas_recaptcha'}
-REJECTION_LIMIT = 3
-
-# Balance fields of the quick balance response, as labelled by the portal's
-# own balance page (data-data attributes).
-POCKET_ACCOMMODATION = 'szamla_osszeg9'  # Szálláshely zseb
-POCKET_ACTIVE_HUNGARIANS = 'szamla_osszeg8'  # Aktív Magyarok zseb
-
-ISSUE_CARD_REJECTED = 'card_rejected'
-ISSUE_INVALID_CONFIG = 'invalid_config'
+UNIT = 'Ft'
 
 
 def _as_text(value):
     # Never fails: Home Assistant appends the offending value to every schema
     # error it logs, which would put the card number or card code into the log.
-    # The format is checked in async_setup_platform instead.
     return '' if value is None else str(value).strip()
 
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
-    {
-        vol.Required(CONF_CARD_NUMBER): _as_text,
-        vol.Required(CONF_CARD_CODE): _as_text,
-        vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
-    }
-)
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
+    vol.Required(CONF_CARD_NUMBER): _as_text,
+    vol.Required(CONF_CARD_CODE): _as_text,
+    vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
+})
 
 
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
+async def async_setup_platform(hass: HomeAssistant, config, async_add_entities, discovery_info=None):
+    """Import a YAML sensor into a config entry; YAML creates no entities any more."""
     card_number = config[CONF_CARD_NUMBER]
     card_code = config[CONF_CARD_CODE]
     name = config[CONF_NAME]
 
-    # One issue per YAML entry, so a valid entry does not clear another's issue.
-    issue_id = f'{ISSUE_INVALID_CONFIG}_{name}'
     problems = []
-    if not (card_number.isdigit() and len(card_number) == 16):
+    if not is_valid_card_number(card_number):
         problems.append('card_number must be exactly 16 digits')
-    if not (card_code.isdigit() and len(card_code) == 3):
+    if not is_valid_card_code(card_code):
         problems.append('card_code must be exactly 3 digits')
     if problems:
-        _LOGGER.error('Invalid configuration: %s. Quote the values in secrets.yaml '
-                      'so leading zeroes are kept. (Values not shown.)', '; '.join(problems))
+        _LOGGER.error('Invalid YAML configuration: %s. (Values not shown.)', '; '.join(problems))
         ir.async_create_issue(
-            hass, DOMAIN, issue_id,
-            is_fixable=False,
-            severity=ir.IssueSeverity.ERROR,
-            translation_key=ISSUE_INVALID_CONFIG,
-            translation_placeholders={'problems': '; '.join(problems)},
+            hass, DOMAIN, f'{ISSUE_INVALID_YAML}_{name}',
+            is_fixable=False, severity=ir.IssueSeverity.ERROR,
+            translation_key=ISSUE_INVALID_YAML,
+            translation_placeholders={'name': name},
         )
         return
-    ir.async_delete_issue(hass, DOMAIN, issue_id)
 
-    # The last 4 digits are what cards show publicly. A hash of the whole
-    # number could be brute forced from the entity registry.
-    card_id = card_number[-4:]
-    client = SzepKartyaClient(hass, card_number, card_code, card_id)
-    sensors = [
-        SzepKartyaSensor(client, name, f'{card_id}_szallashely', POCKET_ACCOMMODATION, primary=True),
-        SzepKartyaSensor(client, f'{name} Aktív Magyarok', f'{card_id}_aktiv_magyarok', POCKET_ACTIVE_HUNGARIANS),
-    ]
+    scan_interval = config.get(CONF_SCAN_INTERVAL)
+    hours = scan_interval.total_seconds() / 3600 if scan_interval else DEFAULT_SCAN_HOURS
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={'source': SOURCE_IMPORT},
+        data={CONF_CARD_NUMBER: card_number, CONF_CARD_CODE: card_code, CONF_NAME: name,
+              CONF_SCAN_HOURS: hours},
+    )
+    if result.get('type') == 'abort' and result.get('reason') != 'already_configured':
+        _LOGGER.error('Importing the YAML configuration of %s failed: %s', name, result.get('reason'))
+        return
+    ir.async_create_issue(
+        hass, DOMAIN, f'{ISSUE_DEPRECATED_YAML}_{card_number[-4:]}',
+        is_fixable=False, severity=ir.IssueSeverity.WARNING,
+        translation_key=ISSUE_DEPRECATED_YAML,
+        translation_placeholders={'name': name},
+    )
 
-    # No update before adding: a failed fetch used to abort platform setup, and
-    # the entities restore their last state first (see async_added_to_hass).
-    async_add_entities(sensors)
+
+async def async_setup_entry(hass: HomeAssistant, entry: SzepKartyaConfigEntry,
+                            async_add_entities: AddEntitiesCallback) -> None:
+    coordinator = entry.runtime_data
+    async_add_entities([
+        PocketSensor(coordinator, POCKET_ACCOMMODATION, 'szallashely', primary=True),
+        PocketSensor(coordinator, POCKET_ACTIVE_HUNGARIANS, 'aktiv_magyarok'),
+        TotalSensor(coordinator),
+        LastSuccessSensor(coordinator),
+    ])
 
 
-def parse_balance(input_string) -> int:
-    if not isinstance(input_string, str):
-        raise ValueError(f'balance is not a string: {type(input_string).__name__}')
-    text = input_string.strip()
-    if text == '':
-        return 0
-    return int(text.replace('+', ''))
+def device_info(coordinator: SzepKartyaCoordinator) -> DeviceInfo:
+    return DeviceInfo(
+        identifiers={(DOMAIN, coordinator.config_entry.entry_id)},
+        name=coordinator.config_entry.title,
+        manufacturer='OTP Bank',
+        model=f'SZÉP Kártya *{coordinator.card_id}',
+        entry_type=DeviceEntryType.SERVICE,
+        configuration_url='https://magan.szepkartya.otpportalok.hu/egyenleglekerdezes/',
+    )
+
+
+class SzepKartyaEntity(CoordinatorEntity[SzepKartyaCoordinator]):
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: SzepKartyaCoordinator, key: str) -> None:
+        super().__init__(coordinator)
+        self._attr_translation_key = key
+        # Same unique IDs as the 1.2.x YAML sensors, so imports keep entity IDs.
+        self._attr_unique_id = f'{coordinator.card_id}_{key}'
+        self._attr_device_info = device_info(coordinator)
+
+    @property
+    def available(self) -> bool:
+        # A failed query keeps the last values: going unavailable and back would
+        # read as spending and top-up to automations that compare states.
+        return self.coordinator.data is not None
+
+
+class PocketSensor(SzepKartyaEntity, SensorEntity):
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_native_unit_of_measurement = UNIT
+    _attr_suggested_display_precision = 0
+
+    def __init__(self, coordinator: SzepKartyaCoordinator, pocket: str, key: str, primary: bool = False) -> None:
+        super().__init__(coordinator, key)
+        self._pocket = pocket
+        self._primary = primary
+        self._attr_icon = 'mdi:bed' if primary else 'mdi:run-fast'
+
+    @property
+    def native_value(self) -> int | None:
+        return self.coordinator.data.balances.get(self._pocket)
+
+    @property
+    def available(self) -> bool:
+        data = self.coordinator.data
+        return data is not None and not (data.polling_stopped and self.native_value is None)
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        if not self._primary:
+            return None
+        # Kept from 1.2.x for existing dashboards and automations.
+        data = self.coordinator.data
+        return {
+            'last_success': _iso(data.last_success),
+            'last_attempt': _iso(data.last_attempt),
+            'last_error': data.last_error,
+            'not_before': _iso(data.not_before),
+            'rejections': data.rejections,
+            'polling_stopped': data.polling_stopped,
+            'stale': data.stale,
+            'Egyenleg': f'{self.native_value} {UNIT}',
+        }
+
+
+class TotalSensor(SzepKartyaEntity, SensorEntity):
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_native_unit_of_measurement = UNIT
+    _attr_suggested_display_precision = 0
+    _attr_icon = 'mdi:credit-card-outline'
+
+    def __init__(self, coordinator: SzepKartyaCoordinator) -> None:
+        super().__init__(coordinator, 'osszesen')
+
+    @property
+    def native_value(self) -> int | None:
+        balances = self.coordinator.data.balances
+        if POCKET_ACCOMMODATION not in balances:
+            return None
+        return sum(balances.values())
+
+
+class LastSuccessSensor(SzepKartyaEntity, SensorEntity):
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: SzepKartyaCoordinator) -> None:
+        super().__init__(coordinator, 'utolso_sikeres_lekerdezes')
+
+    @property
+    def native_value(self):
+        return self.coordinator.data.last_success
 
 
 def _iso(value):
     return value.isoformat() if value else None
-
-
-def _masked(text: str) -> str:
-    """Start of a response body for the log, with numbers hidden."""
-    return re.sub(r'\d(?:[\d \-]*\d){2,}', '<num>', text[:200])
-
-
-class SzepKartyaClient:
-    """One quick balance query per polling round, shared by the sensors."""
-
-    def __init__(self, hass, card_number: str, card_code: str, card_id: str):
-        self.hass = hass
-        self._card_number = card_number
-        self._card_code = card_code
-        self._issue_id = f'{ISSUE_CARD_REJECTED}_{card_id}'
-        self._lock = threading.Lock()
-
-        self.balances: dict = {}
-        self.last_attempt = None
-        self.last_success = None
-        self.last_error = None
-        self.stopped = False
-        self.not_before = None
-        self._backoff = CAPTCHA_BACKOFF_START
-        self.rejections = 0
-
-    def refresh(self):
-        with self._lock:
-            now = dt_util.utcnow()
-            if self.stopped:
-                return
-            if self.last_attempt and now - self.last_attempt < MIN_QUERY_GAP:
-                _LOGGER.debug('Skipping balance query: last one at %s', self.last_attempt)
-                return
-            # Polling rounds arrive at about the backoff length; do not skip a
-            # round over a few seconds of scheduling jitter.
-            if self.not_before and now + MIN_QUERY_GAP < self.not_before:
-                _LOGGER.debug('Skipping balance query until %s (backoff)', self.not_before)
-                return
-            self.not_before = None
-            self.last_attempt = now
-            try:
-                self._query(now)
-            except Exception as err:
-                self._fail(f'Balance update failed: {err!r}')
-
-    def _fail(self, message: str):
-        self.last_error = message
-        _LOGGER.error(message)
-
-    def _query(self, now):
-        deadline = time.monotonic() + REQUEST_DEADLINE
-        with requests.Session() as session:
-            with session.get(URL_HTML, timeout=REQUEST_TIMEOUT,
-                             allow_redirects=False, stream=True) as response:
-                html = self._get_text(response, deadline)
-            match = re.search(r"ajax_token = '([a-z0-9]{64})'", html)
-            if not match:
-                raise ValueError("Can't find ajax_token on the portal page")
-
-            data = {
-                's_azonosito_k': self._card_number,
-                's_telekod_k': self._card_code,
-                'ajax_token': match.group(1),
-                's_captcha': '',
-            }
-            with session.post(URL_API, data=data, timeout=REQUEST_TIMEOUT,
-                              allow_redirects=False, stream=True) as response:
-                status = response.status_code
-                text = self._get_text(response, deadline)
-
-        try:
-            payload = json.loads(text)
-        except ValueError:
-            self._fail(f'Unexpected balance response (HTTP {status}): {_masked(text)}')
-            return
-        self._handle(payload, status, text, now)
-
-    @staticmethod
-    def _get_text(response, deadline) -> str:
-        if response.status_code != 200:
-            raise ValueError(f'HTTP {response.status_code} from {response.url}')
-        body = bytearray()
-        for chunk in response.iter_content(65536):
-            body.extend(chunk)
-            if len(body) > MAX_RESPONSE_BYTES:
-                raise ValueError('Portal response too large')
-            if time.monotonic() > deadline:
-                raise ValueError('Portal response too slow')
-        return body.decode(response.encoding or 'utf-8', errors='replace')
-
-    def _handle(self, payload, status, text, now):
-        first = payload[0] if isinstance(payload, list) and payload else payload
-
-        # The portal answers [{"EREDMENY": "OK"|"HI"|"RC", "UZENET": ...}].
-        # Older answers were bare codes such as ["HI"]; keep understanding them.
-        if isinstance(first, dict):
-            result, message = first.get('EREDMENY'), first.get('UZENET')
-        elif first in ('OK', 'HI', 'RC'):
-            result, message = first, None
-        else:
-            result, message = None, None
-        reason = message if isinstance(message, str) else None
-
-        if result == 'OK' and isinstance(message, dict):
-            if POCKET_ACCOMMODATION not in message:
-                # A missing field must not read as a zero balance.
-                self._fail(f'Balance response without {POCKET_ACCOMMODATION}: '
-                           f'fields {sorted(message)}')
-                return
-            balances = {POCKET_ACCOMMODATION: parse_balance(message[POCKET_ACCOMMODATION])}
-            self.last_error = None
-            if POCKET_ACTIVE_HUNGARIANS in message:
-                balances[POCKET_ACTIVE_HUNGARIANS] = parse_balance(message[POCKET_ACTIVE_HUNGARIANS])
-            else:
-                # Keep the last value, but do not let it look current.
-                self.last_error = f'Balance response without {POCKET_ACTIVE_HUNGARIANS}'
-                _LOGGER.warning(self.last_error)
-            self.balances = balances
-            self.last_success = now
-            self.not_before = None
-            self._backoff = CAPTCHA_BACKOFF_START
-            self.rejections = 0
-            ir.delete_issue(self.hass, DOMAIN, self._issue_id)
-            return
-
-        if result == 'RC' or reason in CAPTCHA_REASONS:
-            self._back_off(now)
-            self._fail(f'Captcha protection kicked in (too many requests); '
-                       f'next query not before {self.not_before.isoformat()}')
-            return
-
-        if result == 'HI' and (reason is None or reason in CARD_REASONS):
-            reason = reason or 'wrong card number or card code'
-            self.rejections += 1
-            if (reason in TOLERATED_REASONS and self.last_success is not None
-                    and self.rejections < REJECTION_LIMIT):
-                self._back_off(now)
-                self._fail(f'The portal rejected the card ({reason}), {self.rejections} of '
-                           f'{REJECTION_LIMIT} in a row; the card worked before, so this may be '
-                           f'temporary. Next query not before {self.not_before.isoformat()}')
-                return
-            self.stopped = True
-            self._fail(f'The portal rejected the card ({reason}); '
-                       f'polling stopped until Home Assistant restarts')
-            ir.create_issue(
-                self.hass, DOMAIN, self._issue_id,
-                is_fixable=False,
-                severity=ir.IssueSeverity.ERROR,
-                translation_key=ISSUE_CARD_REJECTED,
-                translation_placeholders={'reason': reason},
-            )
-            return
-
-        if result == 'HI':
-            # Temporary portal side problems, e.g. otpdirekt_nem_elerheto.
-            self._fail(f'The portal could not answer the balance query ({reason})')
-            return
-
-        self._fail(f'Unexpected balance response (HTTP {status}): {_masked(text)}')
-
-    def _back_off(self, now):
-        self.not_before = now + self._backoff
-        self._backoff = min(self._backoff * 2, CAPTCHA_BACKOFF_MAX)
-
-    def restore(self, attributes, now):
-        """Take over the query history saved in a sensor's last state."""
-        def when(key):
-            value = dt_util.parse_datetime(str(attributes.get(key) or ''))
-            # Only aware times can be compared with now; ours always carry +00:00.
-            return value if value is not None and value.tzinfo is not None else None
-
-        if self.last_success is None:
-            restored = when('last_success')
-            if restored is not None and restored <= now:
-                self.last_success = restored
-        if self.last_attempt is None:
-            restored = when('last_attempt')
-            # A time in the future (clock moved back) would block every query.
-            if restored is not None and restored <= now:
-                self.last_attempt = restored
-        if self.not_before is None:
-            restored = when('not_before')
-            if restored is not None and restored > now:
-                self.not_before = min(restored, now + CAPTCHA_BACKOFF_MAX)
-        if not self.rejections:
-            try:
-                self.rejections = max(0, int(attributes.get('rejections') or 0))
-            except (TypeError, ValueError):
-                self.rejections = 0
-
-
-class SzepKartyaSensor(RestoreSensor):
-    _attr_device_class = SensorDeviceClass.MONETARY
-    _attr_state_class = SensorStateClass.TOTAL
-    _attr_native_unit_of_measurement = DEFAULT_UNIT
-    _attr_suggested_display_precision = 0
-    _attr_icon = DEFAULT_ICON
-
-    def __init__(self, client: SzepKartyaClient, name: str, unique_id: str, pocket: str,
-                 primary: bool = False):
-        self._client = client
-        self._pocket = pocket
-        self._primary = primary
-        self._attr_name = name
-        self._attr_unique_id = unique_id
-        self._attr_native_value = None
-
-    async def async_added_to_hass(self):
-        await super().async_added_to_hass()
-        # Restore before the first query: the last balance, so automations
-        # comparing old and new states do not see unknown -> value, and the
-        # query history, so a restart neither forgets that the card worked nor
-        # skips a captcha backoff.
-        if self._attr_native_value is None:
-            last = await self.async_get_last_sensor_data()
-            if last is not None and last.native_value is not None:
-                try:
-                    self._attr_native_value = int(last.native_value)
-                except (TypeError, ValueError):
-                    pass
-        last_state = await self.async_get_last_state()
-        if last_state is not None:
-            self._client.restore(last_state.attributes, dt_util.utcnow())
-        self._update_attributes()
-        self.async_schedule_update_ha_state(True)
-
-    def update(self):
-        # Never raise: an exception in the first update makes HA drop the entity.
-        try:
-            self._client.refresh()
-        except Exception as err:
-            _LOGGER.error('Balance update failed: %r', err)
-
-        value = self._client.balances.get(self._pocket)
-        if value is not None:
-            self._attr_native_value = value
-        self._update_attributes()
-
-    def _update_attributes(self):
-        client = self._client
-        # A failed query keeps the last balance: going unavailable and back would
-        # read as spending and top-up to automations that compare states.
-        self._attr_available = not (client.stopped and self._attr_native_value is None)
-        stale = client.last_success is None or dt_util.utcnow() - client.last_success > STALE_AFTER
-        attributes = {
-            'last_success': _iso(client.last_success),
-            'last_attempt': _iso(client.last_attempt),
-            'last_error': client.last_error,
-            'not_before': _iso(client.not_before),
-            'rejections': client.rejections,
-            'polling_stopped': client.stopped,
-            'stale': stale,
-        }
-        if self._primary:
-            attributes['Egyenleg'] = f'{self._attr_native_value} {DEFAULT_UNIT}'
-        self._attr_extra_state_attributes = attributes

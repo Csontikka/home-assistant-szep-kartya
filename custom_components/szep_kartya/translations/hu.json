@@ -1,12 +1,83 @@
 {
-  "issues": {
-    "card_rejected": {
-      "title": "SZÉP Kártya: a portál elutasította a kártyát",
-      "description": "Az OTP portál ezzel utasította el az egyenleg-lekérdezést: `{reason}`. Az egyenleg lekérdezése leállt, így a rossz telekódot nem próbálja újra, és a kártya nem zárolódik.\n\nEllenőrizd a YAML-konfigban a `card_number` (mind a 16 számjegy) és a `card_code` értékét, majd indítsd újra a Home Assistantot."
+  "config": {
+    "step": {
+      "user": {
+        "title": "SZÉP Kártya hozzáadása",
+        "description": "Az OTP SZÉP Kártya egyenlegét a portál gyorslekérdezése adja. Hozzáadáskor egyszer lekérdezzük az egyenleget, így azonnal kiderül, ha elgépelted a telekódot.",
+        "data": {
+          "name": "Név",
+          "card_number": "Kártyaszám",
+          "card_code": "Telekód"
+        },
+        "data_description": {
+          "name": "Ez lesz az eszköz neve, például a kártya tulajdonosa.",
+          "card_number": "A kártya teljes, 16 jegyű száma. Szóköz és kötőjel megengedett.",
+          "card_code": "Háromjegyű telekód, alapértelmezetten a kártyaszám utolsó 3 számjegye."
+        }
+      },
+      "reauth_confirm": {
+        "title": "SZÉP Kártya: telekód újra",
+        "description": "A portál elutasította a(z) {name} kártyát (*{last4}). A lekérdezés leállt, hogy egy rossz telekód ne zárolja a kártyát. Add meg újra a telekódot; mentés előtt egyszer lekérdezzük az egyenleget.",
+        "data": {
+          "card_code": "Telekód"
+        }
+      }
     },
-    "invalid_config": {
-      "title": "SZÉP Kártya: hibás konfiguráció",
-      "description": "A szenzor nem jött létre: {problems}.\n\nA `secrets.yaml`-ban mindkét értéket tedd idézőjelbe (például `\"0123\"`), különben a YAML számként olvassa, és elhagyja a kezdő nullákat. Utána indítsd újra a Home Assistantot. Az értékeket sem itt, sem a naplóban nem mutatjuk."
+    "error": {
+      "invalid_card_number": "A kártyaszám pontosan 16 számjegy legyen.",
+      "invalid_card_code": "A telekód pontosan 3 számjegy legyen.",
+      "card_rejected": "A portál elutasította a kártyát ({reason}). Ellenőrizd a kártyaszámot és a telekódot.",
+      "captcha": "A portál most túl sok kérést kapott, és captchát kér. Próbáld újra néhány óra múlva.",
+      "portal_error": "A portál most nem tudott válaszolni. Próbáld újra később.",
+      "cannot_connect": "Nem sikerült elérni a portált."
+    },
+    "abort": {
+      "already_configured": "Ez a kártya már fel van véve.",
+      "reauth_successful": "A telekód elmentve, a lekérdezés újraindult."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "SZÉP Kártya beállításai",
+        "data": {
+          "scan_hours": "Lekérdezés gyakorisága"
+        },
+        "data_description": {
+          "scan_hours": "Ennyi óránként kérdezzük le az egyenleget. A portál a sűrű lekérdezésre captchával válaszol, ezért 1 óránál sűrűbben nem lehet."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "szallashely": {
+        "name": "Szálláshely zseb"
+      },
+      "aktiv_magyarok": {
+        "name": "Aktív Magyarok zseb"
+      },
+      "osszesen": {
+        "name": "Összesen"
+      },
+      "utolso_sikeres_lekerdezes": {
+        "name": "Utolsó sikeres lekérdezés"
+      }
+    },
+    "binary_sensor": {
+      "lekerdezesi_problema": {
+        "name": "Lekérdezési probléma"
+      }
+    }
+  },
+  "issues": {
+    "deprecated_yaml": {
+      "title": "SZÉP Kártya: a YAML-konfiguráció törölhető",
+      "description": "A(z) {name} kártya YAML-konfigurációja átkerült a felületre (*Beállítások › Eszközök és szolgáltatások › SZÉP Kártya*). Töröld a `sensor:` alól a `platform: szep_kartya` blokkot, és ha már nem használod, a hozzá tartozó titkokat a `secrets.yaml`-ből, majd indítsd újra a Home Assistantot."
+    },
+    "invalid_yaml": {
+      "title": "SZÉP Kártya: hibás YAML-konfiguráció",
+      "description": "A(z) {name} kártya YAML-konfigurációjában a kártyaszám nem 16, vagy a telekód nem 3 számjegy (az értékeket nem mutatjuk). A legegyszerűbb, ha törlöd a YAML-blokkot, és a kártyát a felületen veszed fel: *Beállítások › Eszközök és szolgáltatások › Integráció hozzáadása › SZÉP Kártya*."
     }
   }
 }
