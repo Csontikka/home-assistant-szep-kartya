@@ -1,13 +1,16 @@
 {
   "domain": "szep_kartya",
   "name": "SZÉP Kártya",
-  "version": "2.0.0",
+  "codeowners": [
+    "@ofalvai",
+    "@Csontikka"
+  ],
   "config_flow": true,
-  "integration_type": "service",
-  "documentation": "https://github.com/Csontikka/home-assistant-szep-kartya",
-  "issue_tracker": "https://github.com/Csontikka/home-assistant-szep-kartya/issues",
   "dependencies": [],
-  "codeowners": ["@ofalvai", "@Csontikka"],
+  "documentation": "https://github.com/Csontikka/home-assistant-szep-kartya",
+  "integration_type": "service",
   "iot_class": "cloud_polling",
-  "requirements": []
+  "issue_tracker": "https://github.com/Csontikka/home-assistant-szep-kartya/issues",
+  "requirements": [],
+  "version": "2.0.0"
 }

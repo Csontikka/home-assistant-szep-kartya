@@ -17,5 +17,11 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: SzepKar
     entry_dict = async_redact_data(entry.as_dict(), TO_REDACT)
     return {
         'entry': entry_dict,
-        'state': entry.runtime_data.data.to_dict() if entry.runtime_data.data else None,
+        'state': _state(entry),
     }
+
+
+def _state(entry: SzepKartyaConfigEntry) -> dict | None:
+    coordinator = getattr(entry, 'runtime_data', None)
+    data = getattr(coordinator, 'data', None)
+    return data.to_dict() if data else None

@@ -110,7 +110,7 @@ def device_info(coordinator: SzepKartyaCoordinator) -> DeviceInfo:
         identifiers={(DOMAIN, coordinator.config_entry.entry_id)},
         name=coordinator.config_entry.title,
         manufacturer='OTP Bank',
-        model=f'SZÉP Kártya *{coordinator.card_id}',
+        model='SZÉP Kártya',
         entry_type=DeviceEntryType.SERVICE,
         configuration_url='https://magan.szepkartya.otpportalok.hu/egyenleglekerdezes/',
     )
@@ -143,7 +143,8 @@ class PocketSensor(SzepKartyaEntity, SensorEntity):
         super().__init__(coordinator, key)
         self._pocket = pocket
         self._primary = primary
-        self._attr_icon = 'mdi:bed' if primary else 'mdi:run-fast'
+        # The accommodation pocket keeps the icon of the 1.2.x sensor.
+        self._attr_icon = 'mdi:credit-card-outline' if primary else 'mdi:run-fast'
 
     @property
     def native_value(self) -> int | None:
@@ -177,7 +178,7 @@ class TotalSensor(SzepKartyaEntity, SensorEntity):
     _attr_state_class = SensorStateClass.TOTAL
     _attr_native_unit_of_measurement = UNIT
     _attr_suggested_display_precision = 0
-    _attr_icon = 'mdi:credit-card-outline'
+    _attr_icon = 'mdi:wallet'
 
     def __init__(self, coordinator: SzepKartyaCoordinator) -> None:
         super().__init__(coordinator, 'osszesen')

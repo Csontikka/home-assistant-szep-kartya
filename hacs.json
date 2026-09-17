@@ -2,5 +2,6 @@
   "name": "OTP SZÉP Kártya",
   "content_in_root": false,
   "render_readme": true,
-  "country": "HU"
+  "country": "HU",
+  "homeassistant": "2026.9.0"
 }

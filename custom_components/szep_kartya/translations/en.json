@@ -20,6 +20,9 @@
         "description": "A portál elutasította a(z) {name} kártyát (*{last4}). A lekérdezés leállt, hogy egy rossz telekód ne zárolja a kártyát. Add meg újra a telekódot; mentés előtt egyszer lekérdezzük az egyenleget.",
         "data": {
           "card_code": "Telekód"
+        },
+        "data_description": {
+          "card_code": "Háromjegyű telekód, alapértelmezetten a kártyaszám utolsó 3 számjegye."
         }
       }
     },
@@ -29,12 +32,17 @@
       "card_rejected": "A portál elutasította a kártyát ({reason}). Ellenőrizd a kártyaszámot és a telekódot.",
       "captcha": "A portál most túl sok kérést kapott, és captchát kér. Próbáld újra néhány óra múlva.",
       "portal_error": "A portál most nem tudott válaszolni. Próbáld újra később.",
-      "cannot_connect": "Nem sikerült elérni a portált."
+      "cannot_connect": "Nem sikerült elérni a portált.",
+      "busy": "Épp egy másik lekérdezés fut a portál felé. Próbáld újra egy perc múlva.",
+      "last4_conflict": "Már van felvéve egy másik kártya ugyanezzel az utolsó 4 számjeggyel. Ezt a kártyát az integráció nem tudja mellette kezelni."
     },
     "abort": {
       "already_configured": "Ez a kártya már fel van véve.",
-      "reauth_successful": "A telekód elmentve, a lekérdezés újraindult."
-    }
+      "reauth_successful": "A telekód elmentve, a lekérdezés újraindult.",
+      "already_in_progress": "Ennek a kártyának a felvétele már folyamatban van.",
+      "last4_conflict": "Már van felvéve egy másik kártya ugyanezzel az utolsó 4 számjeggyel. Ezt a kártyát az integráció nem tudja mellette kezelni."
+    },
+    "flow_title": "{name}"
   },
   "options": {
     "step": {

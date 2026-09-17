@@ -17,7 +17,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: SzepKartyaConfigEntry) -
     entry.runtime_data = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+    if coordinator.data.polling_stopped:
+        # The reauth flow of a stopped card does not survive a restart.
+        entry.async_start_reauth(hass)
 
     # Query in the background: setup must not wait for the portal, and the
     # coordinator itself decides whether a query is due.
@@ -32,6 +34,3 @@ async def async_unload_entry(hass: HomeAssistant, entry: SzepKartyaConfigEntry) 
 async def async_remove_entry(hass: HomeAssistant, entry: SzepKartyaConfigEntry) -> None:
     await async_remove_store(hass, entry.entry_id)
 
-
-async def _async_options_updated(hass: HomeAssistant, entry: SzepKartyaConfigEntry) -> None:
-    await hass.config_entries.async_reload(entry.entry_id)

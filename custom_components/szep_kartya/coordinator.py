@@ -72,9 +72,9 @@ class CardState:
                 return None
             return value
 
-        def number(key, default, kind):
+        def number(key, default, kind, low, high):
             try:
-                return max(0, kind(data.get(key, default)))
+                return min(high, max(low, kind(data.get(key, default))))
             except (TypeError, ValueError):
                 return default
 
@@ -91,10 +91,19 @@ class CardState:
             last_attempt=when('last_attempt'),
             last_error=data.get('last_error') if isinstance(data.get('last_error'), str) else None,
             not_before=not_before,
-            backoff_hours=number('backoff_hours', BACKOFF_START.total_seconds() / 3600, float),
-            rejections=number('rejections', 0, int),
+            backoff_hours=number('backoff_hours', BACKOFF_START.total_seconds() / 3600, float,
+                                 BACKOFF_START.total_seconds() / 3600, BACKOFF_MAX.total_seconds() / 3600),
+            rejections=number('rejections', 0, int, 0, 1000),
             polling_stopped=bool(data.get('polling_stopped', False)),
         )
+
+
+class GateBusy(Exception):
+    """Another query runs or is due too soon for an interactive flow."""
+
+
+class GateBackoff(Exception):
+    """The portal asked for a captcha recently; every card waits."""
 
 
 class PortalGate:
@@ -105,11 +114,18 @@ class PortalGate:
         self.last_query: float | None = None
         self.not_before: datetime | None = None
 
+    def wait_seconds(self) -> float:
+        if self.last_query is None:
+            return 0
+        return max(0.0, GLOBAL_QUERY_GAP_SECONDS - (time.monotonic() - self.last_query))
+
     async def async_wait_turn(self) -> None:
-        if self.last_query is not None:
-            wait = GLOBAL_QUERY_GAP_SECONDS - (time.monotonic() - self.last_query)
-            if wait > 0:
-                await asyncio.sleep(wait)
+        wait = self.wait_seconds()
+        if wait > 0:
+            await asyncio.sleep(wait)
+
+    def extend_backoff(self, until: datetime) -> None:
+        self.not_before = max(filter(None, (self.not_before, until)))
 
     def mark_query(self) -> None:
         self.last_query = time.monotonic()
@@ -127,17 +143,28 @@ def seed_state(hass: HomeAssistant, card_number: str, state: CardState) -> None:
     hass.data.setdefault(DOMAIN, {}).setdefault('seeds', {})[card_number] = state
 
 
-async def async_query_once(hass: HomeAssistant, card_number: str, card_code: str) -> portal.Answer | None:
-    """One gated query for a config flow. None while a captcha backoff runs."""
+# A config flow waits at most this long for its turn; a form must not hang.
+FLOW_MAX_WAIT_SECONDS = 10
+
+
+async def async_query_once(hass: HomeAssistant, card_number: str, card_code: str) -> portal.Answer:
+    """One gated query for a config flow. Raises GateBusy or GateBackoff."""
     gate = get_gate(hass)
+    if gate.not_before and dt_util.utcnow() < gate.not_before:
+        raise GateBackoff
+    if gate.lock.locked() or gate.wait_seconds() > FLOW_MAX_WAIT_SECONDS:
+        raise GateBusy
     async with gate.lock:
-        if gate.not_before and dt_util.utcnow() < gate.not_before:
-            return None
         await gate.async_wait_turn()
         try:
-            return await hass.async_add_executor_job(portal.query_balance, card_number, card_code)
+            answer = await hass.async_add_executor_job(portal.query_balance, card_number, card_code)
         finally:
             gate.mark_query()
+    if answer.kind == portal.CAPTCHA:
+        gate.extend_backoff(dt_util.utcnow() + BACKOFF_START)
+    elif answer.kind == portal.OK:
+        gate.not_before = None
+    return answer
 
 
 def _store(hass: HomeAssistant, entry_id: str) -> Store:
@@ -180,6 +207,10 @@ class SzepKartyaCoordinator(DataUpdateCoordinator[CardState]):
         stored = await self._store.async_load()
         if seeded is not None:
             state = seeded
+            if stored is not None:
+                # A pocket missing from the test answer keeps its stored value.
+                previous = CardState.from_dict(stored, now).balances
+                state.balances = {**previous, **state.balances}
         elif stored is not None:
             state = CardState.from_dict(stored, now)
         else:
@@ -246,18 +277,28 @@ class SzepKartyaCoordinator(DataUpdateCoordinator[CardState]):
             now = dt_util.utcnow()
             state.not_before = None
             state.last_attempt = now
-            try:
-                answer = await self.hass.async_add_executor_job(
-                    portal.query_balance, self._card_number, self._card_code)
-            except Exception as err:  # noqa: BLE001 - any failure keeps the last balance
-                self._fail(state, f'Balance update failed: {err!r}')
-            else:
-                self._apply(state, answer, now, gate)
-            finally:
-                gate.mark_query()
-
-        await self._async_save(state)
+            # Store the attempt first: if a reload or restart cancels this
+            # update, the next instance still sees the query and waits.
+            await self._async_save(state)
+            # A tracked task, shielded: a cancelled update still records what
+            # the portal said (a rejected code must never be retried by
+            # accident), and Home Assistant waits for it when stopping.
+            task = self.hass.async_create_task(
+                self._async_query_and_record(state, now, gate), f'{DOMAIN} query {self.config_entry.title}')
+            await asyncio.shield(task)
         return state
+
+    async def _async_query_and_record(self, state: CardState, now: datetime, gate: PortalGate) -> None:
+        try:
+            answer = await self.hass.async_add_executor_job(
+                portal.query_balance, self._card_number, self._card_code)
+        except Exception as err:  # noqa: BLE001 - any failure keeps the last balance
+            self._fail(state, f'Balance update failed: {err!r}')
+        else:
+            self._apply(state, answer, now, gate)
+        finally:
+            gate.mark_query()
+        await self._async_save(state)
 
     def _fail(self, state: CardState, message: str) -> None:
         state.last_error = message
@@ -281,7 +322,7 @@ class SzepKartyaCoordinator(DataUpdateCoordinator[CardState]):
 
         if answer.kind == portal.CAPTCHA:
             self._back_off(state, now)
-            gate.not_before = max(filter(None, (gate.not_before, state.not_before)))
+            gate.extend_backoff(state.not_before)
             self._fail(state, f'{answer.message}; next query not before {state.not_before.isoformat()}')
             return
 

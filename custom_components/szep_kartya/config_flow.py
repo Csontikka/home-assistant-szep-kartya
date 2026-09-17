@@ -8,7 +8,7 @@ from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlowWithReload
 from homeassistant.const import CONF_NAME
 from homeassistant.core import callback
 from homeassistant.helpers.selector import (
@@ -32,7 +32,7 @@ from .const import (
     MAX_SCAN_HOURS,
     MIN_SCAN_HOURS,
 )
-from .coordinator import CardState, async_query_once, seed_state
+from .coordinator import CardState, GateBackoff, GateBusy, async_query_once, seed_state
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,10 +47,14 @@ async def _async_check_card(flow: ConfigFlow, card_number: str, card_code: str) 
     """Test the card once. Returns (error key, placeholders)."""
     try:
         answer = await async_query_once(flow.hass, card_number, card_code)
+    except GateBackoff:
+        return 'captcha', {}
+    except GateBusy:
+        return 'busy', {}
     except Exception as err:  # noqa: BLE001 - shown to the user as a connection problem
         _LOGGER.warning('Test query failed: %r', err)
         return 'cannot_connect', {}
-    if answer is None or answer.kind == portal.CAPTCHA:
+    if answer.kind == portal.CAPTCHA:
         return 'captcha', {}
     if answer.kind == portal.CARD_REJECTED:
         return 'card_rejected', {'reason': answer.reason or ''}
@@ -74,7 +78,7 @@ class SzepKartyaConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             card_number = _clean(user_input[CONF_CARD_NUMBER])
             card_code = _clean(user_input[CONF_CARD_CODE])
-            name = (user_input.get(CONF_NAME) or DEFAULT_NAME).strip()
+            name = (user_input.get(CONF_NAME) or '').strip() or DEFAULT_NAME
             if not portal.is_valid_card_number(card_number):
                 errors[CONF_CARD_NUMBER] = 'invalid_card_number'
             if not portal.is_valid_card_code(card_code):
@@ -82,6 +86,9 @@ class SzepKartyaConfigFlow(ConfigFlow, domain=DOMAIN):
             if not errors:
                 await self.async_set_unique_id(card_number)
                 self._abort_if_unique_id_configured()
+                if self._last4_taken(card_number):
+                    errors['base'] = 'last4_conflict'
+            if not errors:
                 error, placeholders_update = await _async_check_card(self, card_number, card_code)
                 placeholders.update(placeholders_update)
                 if error:
@@ -107,12 +114,22 @@ class SzepKartyaConfigFlow(ConfigFlow, domain=DOMAIN):
         card_number = _clean(import_data[CONF_CARD_NUMBER])
         await self.async_set_unique_id(card_number)
         self._abort_if_unique_id_configured()
+        if self._last4_taken(card_number):
+            return self.async_abort(reason='last4_conflict')
         hours = import_data.get(CONF_SCAN_HOURS, DEFAULT_SCAN_HOURS)
         hours = min(MAX_SCAN_HOURS, max(MIN_SCAN_HOURS, int(round(hours))))
         return self.async_create_entry(
             title=import_data.get(CONF_NAME) or DEFAULT_NAME,
             data={CONF_CARD_NUMBER: card_number, CONF_CARD_CODE: _clean(import_data[CONF_CARD_CODE])},
             options={CONF_SCAN_HOURS: hours},
+        )
+
+    def _last4_taken(self, card_number: str) -> bool:
+        # Entity unique IDs use the last 4 digits (as 1.2.x did); two cards
+        # sharing them would take over each other's entities.
+        return any(
+            entry.unique_id != card_number and (entry.unique_id or '')[-4:] == card_number[-4:]
+            for entry in self._async_current_entries(include_ignore=False)
         )
 
     async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> ConfigFlowResult:
@@ -145,11 +162,11 @@ class SzepKartyaConfigFlow(ConfigFlow, domain=DOMAIN):
 
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
+    def async_get_options_flow(config_entry: ConfigEntry) -> SzepKartyaOptionsFlow:
         return SzepKartyaOptionsFlow()
 
 
-class SzepKartyaOptionsFlow(OptionsFlow):
+class SzepKartyaOptionsFlow(OptionsFlowWithReload):
     """Polling interval."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:

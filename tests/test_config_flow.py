@@ -49,15 +49,16 @@ async def test_user_flow_rejected_and_captcha(hass: HomeAssistant, portal_mock) 
     assert result['errors'] == {'base': 'card_rejected'}
     assert result['description_placeholders']['reason'] == 'hibas_kartyaszam_vagy_telekod'
 
-    portal_mock.return_value = captcha()
-    result = await hass.config_entries.flow.async_configure(
-        result['flow_id'], {'name': 'x', 'card_number': CARD, 'card_code': CODE})
-    assert result['errors'] == {'base': 'captcha'}
-
     portal_mock.side_effect = OSError('boom')
     result = await hass.config_entries.flow.async_configure(
         result['flow_id'], {'name': 'x', 'card_number': CARD, 'card_code': CODE})
     assert result['errors'] == {'base': 'cannot_connect'}
+
+    portal_mock.side_effect = None
+    portal_mock.return_value = captcha()
+    result = await hass.config_entries.flow.async_configure(
+        result['flow_id'], {'name': 'x', 'card_number': CARD, 'card_code': CODE})
+    assert result['errors'] == {'base': 'captcha'}
 
 
 async def test_duplicate_card_aborts_before_query(hass: HomeAssistant, portal_mock) -> None:

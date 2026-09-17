@@ -21,7 +21,7 @@ Kártyánként add meg:
 - **Kártyaszám**: a teljes, 16 jegyű szám (szóköz és kötőjel megengedett).
 - **Telekód**: háromjegyű, alapértelmezetten a kártyaszám utolsó 3 számjegye.
 
-Hozzáadáskor egyszer lekérdezzük az egyenleget, így azonnal kiderül, ha valami el van gépelve. Ugyanazt a kártyát kétszer nem lehet felvenni.
+Hozzáadáskor egyszer lekérdezzük az egyenleget, így azonnal kiderül, ha valami el van gépelve. Ugyanazt a kártyát kétszer nem lehet felvenni, és két olyan kártyát sem, amelynek egyezik az utolsó 4 számjegye (az entitásazonosítók ebből képződnek).
 
 **Beállítások** (az integráció *Konfigurálás* gombja): a lekérdezés gyakorisága, 1 és 24 óra között, alapból 4 óra.
 
@@ -43,14 +43,14 @@ A Szálláshely zseb szenzoron megmaradtak az 1.2.x attribútumai (`last_success
 
 A portál a sűrű lekérdezésre captchával válaszol, és ilyenkor működő kártyára is adhat `nincs_kartya` hibát. Ezért:
 
-- Egy kártyát legfeljebb 15 percenként kérdezünk le. Az állapot újraindítás után is megmarad, így egy újraindítás-sorozat egyetlen lekérdezés. A 15 percen belüli kézi frissítés nem csinál semmit.
+- Egy kártyát legfeljebb 15 percenként kérdezünk le. A kísérletet még a lekérdezés előtt elmentjük, így egy újraindítás-sorozat egyetlen lekérdezés, akkor is, ha az újraindítás épp lekérdezés közben jön. A 15 percen belüli kézi frissítés nem csinál semmit.
 - A kártyák lekérdezései sorban mennek, köztük legalább 1 perc szünettel.
 - Captcha után a következő lekérdezés vár: 8 óra, ismétlődésnél duplázódva legfeljebb 24 óra. Ez **minden kártyára** vonatkozik, mert a korlát a közös IP-címet éri.
 - Egy sikertelen lekérdezés nem nullázza az egyenleget, és nem teszi elérhetetlenné a szenzort. Az automatizmusok így nem látnak hamis költést vagy jóváírást.
 
 ## Ha a portál elutasítja a kártyát
 
-- `hibas_kartyaszam_vagy_telekod`, `letiltott_inaktiv_kartya`, `virtualis_kartya`: a lekérdezés azonnal leáll, hogy egy rossz telekód ne zárolja a kártyát. A Home Assistant értesítést küld, és a felületen kéri újra a telekódot. Mentés előtt egyszer lekérdezzük az egyenleget.
+- `hibas_kartyaszam_vagy_telekod`, `letiltott_inaktiv_kartya`, `virtualis_kartya`: a lekérdezés azonnal leáll, hogy egy rossz telekód ne zárolja a kártyát. A Home Assistant értesítést küld, és a felületen kéri újra a telekódot, újraindítás után is. Mentés előtt egyszer lekérdezzük az egyenleget.
 - `nincs_kartya`: ha a kártya korábban már működött, átmenetinek vesszük (várakozással), és csak 3 egymás utáni elutasításnál áll le. Ha még sosem működött, azonnal leáll.
 - Minden más portálhiba (pl. `api_nem_elerheto`) átmeneti: naplózzuk, és a következő körben újrapróbáljuk.
 
@@ -66,7 +66,9 @@ Nincs teendő a frissítés előtt. Az első indításkor a `sensor:` alatti `pl
 
 Utána egy javítási értesítés jelzi, hogy a YAML-blokk törölhető. A YAML-ből már nem jönnek létre entitások.
 
-A szenzorok megjelenített neve a felületes szerkezethez igazodik (pl. *SZÉP Kártya Szálláshely zseb*); az entitásazonosító nem változik.
+A szenzorok megjelenített neve a felületes szerkezethez igazodik (pl. *SZÉP Kártya Szálláshely zseb*); az entitásazonosító és az ikon nem változik.
+
+Az átállás után a YAML-ban vagy a `secrets.yaml`-ben átírt telekód már nem számít: a telekódot a felületen lehet cserélni (elutasításkor a Home Assistant magától kéri).
 
 ## Hibaelhárítás
 
