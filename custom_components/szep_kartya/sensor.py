@@ -53,15 +53,18 @@ CAPTCHA_BACKOFF_MAX = timedelta(hours=24)
 STALE_AFTER = timedelta(hours=48)
 
 # 'HI' reasons that blame the card. Retrying a wrong card code risks locking the
-# card, but the portal has also answered nincs_kartya for a working card right
-# after a burst of queries. So polling stops at once only for a card that never
-# had a successful query; otherwise after REJECTION_LIMIT answers in a row.
+# card, so polling stops at the first of these.
 CARD_REASONS = {
     'hibas_kartyaszam_vagy_telekod',
     'letiltott_inaktiv_kartya',
     'nincs_kartya',
     'virtualis_kartya',
 }
+# The portal has also answered nincs_kartya for a working card right after a
+# burst of queries. For a card that had a successful query before, this reason
+# only stops polling after REJECTION_LIMIT answers in a row (the count survives
+# restarts).
+TOLERATED_REASONS = {'nincs_kartya'}
 CAPTCHA_REASONS = {'hibas_recaptcha'}
 REJECTION_LIMIT = 3
 
@@ -164,7 +167,7 @@ class SzepKartyaClient:
         self.stopped = False
         self.not_before = None
         self._backoff = CAPTCHA_BACKOFF_START
-        self._rejections = 0
+        self.rejections = 0
 
     def refresh(self):
         with self._lock:
@@ -172,12 +175,14 @@ class SzepKartyaClient:
             if self.stopped:
                 return
             if self.last_attempt and now - self.last_attempt < MIN_QUERY_GAP:
+                _LOGGER.debug('Skipping balance query: last one at %s', self.last_attempt)
                 return
             # Polling rounds arrive at about the backoff length; do not skip a
             # round over a few seconds of scheduling jitter.
             if self.not_before and now + MIN_QUERY_GAP < self.not_before:
-                _LOGGER.debug('Skipping balance query until %s (captcha backoff)', self.not_before)
+                _LOGGER.debug('Skipping balance query until %s (backoff)', self.not_before)
                 return
+            self.not_before = None
             self.last_attempt = now
             try:
                 self._query(now)
@@ -260,7 +265,7 @@ class SzepKartyaClient:
             self.last_success = now
             self.not_before = None
             self._backoff = CAPTCHA_BACKOFF_START
-            self._rejections = 0
+            self.rejections = 0
             ir.delete_issue(self.hass, DOMAIN, self._issue_id)
             return
 
@@ -272,10 +277,11 @@ class SzepKartyaClient:
 
         if result == 'HI' and (reason is None or reason in CARD_REASONS):
             reason = reason or 'wrong card number or card code'
-            self._rejections += 1
-            if self.last_success is not None and self._rejections < REJECTION_LIMIT:
+            self.rejections += 1
+            if (reason in TOLERATED_REASONS and self.last_success is not None
+                    and self.rejections < REJECTION_LIMIT):
                 self._back_off(now)
-                self._fail(f'The portal rejected the card ({reason}), {self._rejections} of '
+                self._fail(f'The portal rejected the card ({reason}), {self.rejections} of '
                            f'{REJECTION_LIMIT} in a row; the card worked before, so this may be '
                            f'temporary. Next query not before {self.not_before.isoformat()}')
                 return
@@ -301,6 +307,30 @@ class SzepKartyaClient:
     def _back_off(self, now):
         self.not_before = now + self._backoff
         self._backoff = min(self._backoff * 2, CAPTCHA_BACKOFF_MAX)
+
+    def restore(self, attributes, now):
+        """Take over the query history saved in a sensor's last state."""
+        def when(key):
+            return dt_util.parse_datetime(str(attributes.get(key) or ''))
+
+        if self.last_success is None:
+            restored = when('last_success')
+            if restored is not None and restored <= now:
+                self.last_success = restored
+        if self.last_attempt is None:
+            restored = when('last_attempt')
+            # A time in the future (clock moved back) would block every query.
+            if restored is not None and restored <= now:
+                self.last_attempt = restored
+        if self.not_before is None:
+            restored = when('not_before')
+            if restored is not None and restored > now:
+                self.not_before = min(restored, now + CAPTCHA_BACKOFF_MAX)
+        if not self.rejections:
+            try:
+                self.rejections = max(0, int(attributes.get('rejections') or 0))
+            except (TypeError, ValueError):
+                self.rejections = 0
 
 
 class SzepKartyaSensor(RestoreSensor):
@@ -334,12 +364,7 @@ class SzepKartyaSensor(RestoreSensor):
                     pass
         last_state = await self.async_get_last_state()
         if last_state is not None:
-            client = self._client
-            for attribute in ('last_success', 'last_attempt', 'not_before'):
-                if getattr(client, attribute) is None:
-                    restored = dt_util.parse_datetime(str(last_state.attributes.get(attribute) or ''))
-                    if restored is not None:
-                        setattr(client, attribute, restored)
+            self._client.restore(last_state.attributes, dt_util.utcnow())
         self._update_attributes()
         self.async_schedule_update_ha_state(True)
 
@@ -366,6 +391,7 @@ class SzepKartyaSensor(RestoreSensor):
             'last_attempt': _iso(client.last_attempt),
             'last_error': client.last_error,
             'not_before': _iso(client.not_before),
+            'rejections': client.rejections,
             'polling_stopped': client.stopped,
             'stale': stale,
         }
