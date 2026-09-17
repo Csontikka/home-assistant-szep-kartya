@@ -88,6 +88,8 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
     card_code = config[CONF_CARD_CODE]
     name = config[CONF_NAME]
 
+    # One issue per YAML entry, so a valid entry does not clear another's issue.
+    issue_id = f'{ISSUE_INVALID_CONFIG}_{name}'
     problems = []
     if not (card_number.isdigit() and len(card_number) == 16):
         problems.append('card_number must be exactly 16 digits')
@@ -97,14 +99,14 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
         _LOGGER.error('Invalid configuration: %s. Quote the values in secrets.yaml '
                       'so leading zeroes are kept. (Values not shown.)', '; '.join(problems))
         ir.async_create_issue(
-            hass, DOMAIN, ISSUE_INVALID_CONFIG,
+            hass, DOMAIN, issue_id,
             is_fixable=False,
             severity=ir.IssueSeverity.ERROR,
             translation_key=ISSUE_INVALID_CONFIG,
             translation_placeholders={'problems': '; '.join(problems)},
         )
         return
-    ir.async_delete_issue(hass, DOMAIN, ISSUE_INVALID_CONFIG)
+    ir.async_delete_issue(hass, DOMAIN, issue_id)
 
     # The last 4 digits are what cards show publicly. A hash of the whole
     # number could be brute forced from the entity registry.
@@ -235,11 +237,15 @@ class SzepKartyaClient:
                            f'fields {sorted(message)}')
                 return
             balances = {POCKET_ACCOMMODATION: parse_balance(message[POCKET_ACCOMMODATION])}
+            self.last_error = None
             if POCKET_ACTIVE_HUNGARIANS in message:
                 balances[POCKET_ACTIVE_HUNGARIANS] = parse_balance(message[POCKET_ACTIVE_HUNGARIANS])
+            else:
+                # Keep the last value, but do not let it look current.
+                self.last_error = f'Balance response without {POCKET_ACTIVE_HUNGARIANS}'
+                _LOGGER.warning(self.last_error)
             self.balances = balances
             self.last_success = now
-            self.last_error = None
             self._not_before = None
             self._backoff = CAPTCHA_BACKOFF_START
             ir.delete_issue(self.hass, DOMAIN, self._issue_id)

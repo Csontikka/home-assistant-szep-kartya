@@ -70,11 +70,13 @@ One query per polling round feeds both sensors:
 
 The field mapping comes from the labels on the portal's own balance page. The entity IDs above follow the default `name`.
 
+The unique IDs are built from the last 4 digits of the card. After a card replacement with new last digits, Home Assistant creates new entities (for example `sensor.szep_kartya_2`); remove the old ones in *Settings > Entities* and rename the new ones.
+
 Attributes:
 
 - `last_success`: time of the last successful query.
 - `last_error`: the last error, cleared by the next successful query.
-- `stale`: `true` when there was no successful query in the last 48 hours, or none since the restart.
+- `stale`: `true` when there was no successful query in the last 48 hours. `last_success` is restored after a restart; `stale` is also `true` when no successful query is known at all.
 - `Egyenleg` (main sensor only): the balance as text, kept for compatibility with upstream.
 
 A failed query keeps the last balance, and the last balance is restored after a restart, so automations that compare old and new states do not see a fake drop to `unavailable` or `unknown` and back. Use `stale` or `last_success` to notice a long outage. The sensors are only unavailable when the portal rejected the card and there is no balance to show.
