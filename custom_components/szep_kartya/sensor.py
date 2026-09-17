@@ -27,13 +27,13 @@ DEFAULT_ICON = 'mdi:credit-card-outline'
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
-        vol.Required(CONF_CARD_NUMBER): vol.All(cv.string, vol.Length(min=8, max=8)),
+        vol.Required(CONF_CARD_NUMBER): vol.All(cv.string, vol.Length(min=16, max=16)),
         vol.Required(CONF_CARD_CODE): vol.All(cv.string, vol.Length(min=3, max=3)),
         vol.Optional(CONF_NAME, DEFAULT_NAME): cv.string
     }
 )
 
-URL_API = 'https://magan.szepkartya.otpportalok.hu/ajax/egyenleglekerdezes/'
+URL_API = 'https://magan.szepkartya.otpportalok.hu/ajax/gyorsegyenleg/'
 URL_HTML = 'https://magan.szepkartya.otpportalok.hu/fooldal/'
 
 
@@ -108,14 +108,14 @@ class SzepKartyaSensor(Entity):
             'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
         }
         response_api = requests.post(URL_API, headers=headers, data=request_body, cookies=cookies)
-        
+
         response_json = json.loads(response_api.text)
         if response_json[0] == 'RC':
             _LOGGER.error('Captcha protection kicked in (too many requests)')
         elif response_json[0] == 'HI':
             _LOGGER.error('Wrong card number or card code')
         else:
-            self.balance = parse_balance(response_json[1]['szamla_osszeg9'])
+            self.balance = parse_balance(response_json[0]['UZENET']['szamla_osszeg9'])
 
 def parse_balance(input_string: str) -> int:
     if input_string.strip() == '':
