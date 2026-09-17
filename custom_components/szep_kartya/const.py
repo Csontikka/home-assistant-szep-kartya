@@ -53,3 +53,4 @@ STORE_VERSION = 1
 
 ISSUE_DEPRECATED_YAML = 'deprecated_yaml'
 ISSUE_INVALID_YAML = 'invalid_yaml'
+ISSUE_IMPORT_FAILED = 'import_failed'

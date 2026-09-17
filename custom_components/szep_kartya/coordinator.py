@@ -280,25 +280,41 @@ class SzepKartyaCoordinator(DataUpdateCoordinator[CardState]):
             # Store the attempt first: if a reload or restart cancels this
             # update, the next instance still sees the query and waits.
             await self._async_save(state)
-            # A tracked task, shielded: a cancelled update still records what
-            # the portal said (a rejected code must never be retried by
-            # accident), and Home Assistant waits for it when stopping.
+            # Shielded: an update cancelled by a reload still records what the
+            # portal said, so a rejected code is not retried by accident. (A
+            # Home Assistant shutdown may still cancel it; the attempt saved
+            # above keeps the next start from querying again at once.)
             task = self.hass.async_create_task(
                 self._async_query_and_record(state, now, gate), f'{DOMAIN} query {self.config_entry.title}')
             await asyncio.shield(task)
         return state
 
     async def _async_query_and_record(self, state: CardState, now: datetime, gate: PortalGate) -> None:
+        # Marked at the start too: if the update is cancelled, the gate lock is
+        # released while this query still runs.
+        gate.mark_query()
+        entry_id = self.config_entry.entry_id
         try:
             answer = await self.hass.async_add_executor_job(
                 portal.query_balance, self._card_number, self._card_code)
         except Exception as err:  # noqa: BLE001 - any failure keeps the last balance
-            self._fail(state, f'Balance update failed: {err!r}')
-        else:
-            self._apply(state, answer, now, gate)
+            answer = None
+            error = err
         finally:
             gate.mark_query()
+        entry = self.hass.config_entries.async_get_entry(entry_id)
+        if entry is None:
+            return  # removed during the query: nothing to record or ask for
+        if answer is None:
+            self._fail(state, f'Balance update failed: {error!r}')
+        else:
+            self._apply(state, answer, now, gate)
         await self._async_save(state)
+        current = getattr(entry, 'runtime_data', None)
+        if isinstance(current, SzepKartyaCoordinator) and current is not self:
+            # Reloaded during the query: the new instance has not queried yet
+            # (the attempt was saved first), so hand it the answer.
+            current.async_set_updated_data(state)
 
     def _fail(self, state: CardState, message: str) -> None:
         state.last_error = message

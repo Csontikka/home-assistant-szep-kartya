@@ -135,3 +135,42 @@ async def test_corrupt_backoff_is_clamped(hass: HomeAssistant, portal_mock, hass
     await hass.async_block_till_done()
     assert entry.runtime_data.data.backoff_hours == 8
     assert entry.runtime_data.data.rejections == 0
+
+
+async def test_answer_of_a_query_cut_by_a_reload_reaches_the_new_instance(hass: HomeAssistant, portal_mock,
+                                                                          freezer) -> None:
+    from custom_components.szep_kartya.coordinator import CardState
+    from .conftest import rejected
+    entry = _entry(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    old = entry.runtime_data
+    freezer.tick(timedelta(hours=4))
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    new = entry.runtime_data
+    assert new is not old
+    # The old instance's query finishes after the reload, with a rejected code.
+    portal_mock.return_value = rejected()
+    state = CardState(balances=dict(old.data.balances), last_success=old.data.last_success,
+                      last_attempt=dt_util.utcnow())
+    await old._async_query_and_record(state, dt_util.utcnow(), get_gate(hass))
+    await hass.async_block_till_done()
+    assert new.data.polling_stopped
+    assert any(f['context']['source'] == 'reauth' for f in hass.config_entries.flow.async_progress_by_handler(DOMAIN))
+
+
+async def test_query_of_a_removed_entry_records_nothing(hass: HomeAssistant, portal_mock, hass_storage) -> None:
+    from custom_components.szep_kartya.coordinator import CardState
+    from .conftest import rejected
+    entry = _entry(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    old = entry.runtime_data
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    portal_mock.return_value = rejected()
+    await old._async_query_and_record(CardState(), dt_util.utcnow(), get_gate(hass))
+    await hass.async_block_till_done()
+    assert f'{DOMAIN}.{entry.entry_id}' not in hass_storage
+    assert hass.config_entries.flow.async_progress_by_handler(DOMAIN) == []

@@ -86,6 +86,10 @@
     "invalid_yaml": {
       "title": "SZÉP Kártya: hibás YAML-konfiguráció",
       "description": "A(z) {name} kártya YAML-konfigurációjában a kártyaszám nem 16, vagy a telekód nem 3 számjegy (az értékeket nem mutatjuk). A legegyszerűbb, ha törlöd a YAML-blokkot, és a kártyát a felületen veszed fel: *Beállítások › Eszközök és szolgáltatások › Integráció hozzáadása › SZÉP Kártya*."
+    },
+    "import_failed": {
+      "title": "SZÉP Kártya: a YAML-konfiguráció nem került át",
+      "description": "A(z) {name} kártya YAML-konfigurációját nem sikerült a felületre átvinni ({reason}). A `last4_conflict` azt jelenti, hogy már van felvéve egy másik kártya ugyanezzel az utolsó 4 számjeggyel, és a kettőt az integráció nem tudja együtt kezelni. Amíg ez fennáll, ehhez a kártyához nem jönnek létre entitások."
     }
   }
 }

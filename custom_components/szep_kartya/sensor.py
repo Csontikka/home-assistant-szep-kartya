@@ -30,6 +30,7 @@ from .const import (
     DEFAULT_SCAN_HOURS,
     DOMAIN,
     ISSUE_DEPRECATED_YAML,
+    ISSUE_IMPORT_FAILED,
     ISSUE_INVALID_YAML,
     POCKET_ACCOMMODATION,
     POCKET_ACTIVE_HUNGARIANS,
@@ -85,6 +86,12 @@ async def async_setup_platform(hass: HomeAssistant, config, async_add_entities, 
     )
     if result.get('type') == 'abort' and result.get('reason') != 'already_configured':
         _LOGGER.error('Importing the YAML configuration of %s failed: %s', name, result.get('reason'))
+        ir.async_create_issue(
+            hass, DOMAIN, f'{ISSUE_IMPORT_FAILED}_{name}',
+            is_fixable=False, severity=ir.IssueSeverity.ERROR,
+            translation_key=ISSUE_IMPORT_FAILED,
+            translation_placeholders={'name': name, 'reason': str(result.get('reason'))},
+        )
         return
     ir.async_create_issue(
         hass, DOMAIN, f'{ISSUE_DEPRECATED_YAML}_{card_number[-4:]}',
