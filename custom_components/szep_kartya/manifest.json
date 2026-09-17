@@ -1,7 +1,7 @@
 {
   "domain": "szep_kartya",
   "name": "SZÉP Kártya",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "documentation": "https://github.com/Csontikka/home-assistant-szep-kartya",
   "issue_tracker": "https://github.com/Csontikka/home-assistant-szep-kartya/issues",
   "dependencies": [],

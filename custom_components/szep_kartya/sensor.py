@@ -40,23 +40,30 @@ REQUEST_TIMEOUT = 30
 REQUEST_DEADLINE = 60
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
-# Both sensors update in the same polling round; they share one query.
-SHARED_RESULT_MAX_AGE = timedelta(minutes=5)
-# After a captcha the next query waits at least this long, doubling up to a day.
+# Minimum gap between two queries. Both sensors of a polling round share one
+# query, and a burst of Home Assistant restarts sends only one (the last attempt
+# is restored). Frequent queries make the portal answer with captchas and even
+# with card errors for a working card.
+MIN_QUERY_GAP = timedelta(minutes=15)
+# After a captcha or a card error the next query waits at least this long,
+# doubling up to a day.
 CAPTCHA_BACKOFF_START = timedelta(hours=8)
 CAPTCHA_BACKOFF_MAX = timedelta(hours=24)
 # No successful query for this long sets the 'stale' attribute.
 STALE_AFTER = timedelta(hours=48)
 
-# 'HI' reasons that will not fix themselves. Retrying a rejected card code
-# risks locking the card, so polling stops until Home Assistant restarts.
-PERMANENT_REASONS = {
+# 'HI' reasons that blame the card. Retrying a wrong card code risks locking the
+# card, but the portal has also answered nincs_kartya for a working card right
+# after a burst of queries. So polling stops at once only for a card that never
+# had a successful query; otherwise after REJECTION_LIMIT answers in a row.
+CARD_REASONS = {
     'hibas_kartyaszam_vagy_telekod',
     'letiltott_inaktiv_kartya',
     'nincs_kartya',
     'virtualis_kartya',
 }
 CAPTCHA_REASONS = {'hibas_recaptcha'}
+REJECTION_LIMIT = 3
 
 # Balance fields of the quick balance response, as labelled by the portal's
 # own balance page (data-data attributes).
@@ -117,9 +124,9 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
         SzepKartyaSensor(client, f'{name} Aktív Magyarok', f'{card_id}_aktiv_magyarok', POCKET_ACTIVE_HUNGARIANS),
     ]
 
-    # Add the entities first and let HA run the first update. A failed fetch
-    # used to abort platform setup, and HA never retries that.
-    async_add_entities(sensors, True)
+    # No update before adding: a failed fetch used to abort platform setup, and
+    # the entities restore their last state first (see async_added_to_hass).
+    async_add_entities(sensors)
 
 
 def parse_balance(input_string) -> int:
@@ -129,6 +136,10 @@ def parse_balance(input_string) -> int:
     if text == '':
         return 0
     return int(text.replace('+', ''))
+
+
+def _iso(value):
+    return value.isoformat() if value else None
 
 
 def _masked(text: str) -> str:
@@ -151,20 +162,21 @@ class SzepKartyaClient:
         self.last_success = None
         self.last_error = None
         self.stopped = False
-        self._not_before = None
+        self.not_before = None
         self._backoff = CAPTCHA_BACKOFF_START
+        self._rejections = 0
 
     def refresh(self):
         with self._lock:
             now = dt_util.utcnow()
             if self.stopped:
                 return
-            if self.last_attempt and now - self.last_attempt < SHARED_RESULT_MAX_AGE:
+            if self.last_attempt and now - self.last_attempt < MIN_QUERY_GAP:
                 return
             # Polling rounds arrive at about the backoff length; do not skip a
             # round over a few seconds of scheduling jitter.
-            if self._not_before and now + SHARED_RESULT_MAX_AGE < self._not_before:
-                _LOGGER.debug('Skipping balance query until %s (captcha backoff)', self._not_before)
+            if self.not_before and now + MIN_QUERY_GAP < self.not_before:
+                _LOGGER.debug('Skipping balance query until %s (captcha backoff)', self.not_before)
                 return
             self.last_attempt = now
             try:
@@ -246,20 +258,27 @@ class SzepKartyaClient:
                 _LOGGER.warning(self.last_error)
             self.balances = balances
             self.last_success = now
-            self._not_before = None
+            self.not_before = None
             self._backoff = CAPTCHA_BACKOFF_START
+            self._rejections = 0
             ir.delete_issue(self.hass, DOMAIN, self._issue_id)
             return
 
         if result == 'RC' or reason in CAPTCHA_REASONS:
-            self._not_before = now + self._backoff
+            self._back_off(now)
             self._fail(f'Captcha protection kicked in (too many requests); '
-                       f'next query not before {self._not_before.isoformat()}')
-            self._backoff = min(self._backoff * 2, CAPTCHA_BACKOFF_MAX)
+                       f'next query not before {self.not_before.isoformat()}')
             return
 
-        if result == 'HI' and (reason is None or reason in PERMANENT_REASONS):
+        if result == 'HI' and (reason is None or reason in CARD_REASONS):
             reason = reason or 'wrong card number or card code'
+            self._rejections += 1
+            if self.last_success is not None and self._rejections < REJECTION_LIMIT:
+                self._back_off(now)
+                self._fail(f'The portal rejected the card ({reason}), {self._rejections} of '
+                           f'{REJECTION_LIMIT} in a row; the card worked before, so this may be '
+                           f'temporary. Next query not before {self.not_before.isoformat()}')
+                return
             self.stopped = True
             self._fail(f'The portal rejected the card ({reason}); '
                        f'polling stopped until Home Assistant restarts')
@@ -278,6 +297,10 @@ class SzepKartyaClient:
             return
 
         self._fail(f'Unexpected balance response (HTTP {status}): {_masked(text)}')
+
+    def _back_off(self, now):
+        self.not_before = now + self._backoff
+        self._backoff = min(self._backoff * 2, CAPTCHA_BACKOFF_MAX)
 
 
 class SzepKartyaSensor(RestoreSensor):
@@ -298,8 +321,10 @@ class SzepKartyaSensor(RestoreSensor):
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
-        # A failed first query after a restart keeps the last known balance, so
-        # automations comparing old and new states do not see unknown -> value.
+        # Restore before the first query: the last balance, so automations
+        # comparing old and new states do not see unknown -> value, and the
+        # query history, so a restart neither forgets that the card worked nor
+        # skips a captcha backoff.
         if self._attr_native_value is None:
             last = await self.async_get_last_sensor_data()
             if last is not None and last.native_value is not None:
@@ -307,13 +332,16 @@ class SzepKartyaSensor(RestoreSensor):
                     self._attr_native_value = int(last.native_value)
                 except (TypeError, ValueError):
                     pass
-        if self._client.last_success is None:
-            last_state = await self.async_get_last_state()
-            if last_state is not None:
-                restored = dt_util.parse_datetime(str(last_state.attributes.get('last_success') or ''))
-                if restored is not None:
-                    self._client.last_success = restored
+        last_state = await self.async_get_last_state()
+        if last_state is not None:
+            client = self._client
+            for attribute in ('last_success', 'last_attempt', 'not_before'):
+                if getattr(client, attribute) is None:
+                    restored = dt_util.parse_datetime(str(last_state.attributes.get(attribute) or ''))
+                    if restored is not None:
+                        setattr(client, attribute, restored)
         self._update_attributes()
+        self.async_schedule_update_ha_state(True)
 
     def update(self):
         # Never raise: an exception in the first update makes HA drop the entity.
@@ -334,8 +362,11 @@ class SzepKartyaSensor(RestoreSensor):
         self._attr_available = not (client.stopped and self._attr_native_value is None)
         stale = client.last_success is None or dt_util.utcnow() - client.last_success > STALE_AFTER
         attributes = {
-            'last_success': client.last_success.isoformat() if client.last_success else None,
+            'last_success': _iso(client.last_success),
+            'last_attempt': _iso(client.last_attempt),
             'last_error': client.last_error,
+            'not_before': _iso(client.not_before),
+            'polling_stopped': client.stopped,
             'stale': stale,
         }
         if self._primary:

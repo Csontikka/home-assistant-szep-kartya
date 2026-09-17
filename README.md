@@ -13,7 +13,8 @@ This is a fork of [ofalvai/home-assistant-szep-kartya](https://github.com/ofalva
 - **Current portal endpoint.** The balance comes from the portal's quick balance query (`/ajax/gyorsegyenleg/`), which needs the full 16-digit card number. The old `/ajax/egyenleglekerdezes/` endpoint is gone.
 - **Both pockets.** A separate sensor for the Aktív Magyarok pocket, from the same query.
 - **The sensor survives a failed query.** Upstream ran the first query during platform setup. If the portal answered with anything unexpected, setup failed, Home Assistant never retried it, and the sensor disappeared until the next restart. Here the entities are always created, a failed query keeps the previous balance, and the last balance is restored after a restart.
-- **Portal errors are understood.** A rejected card stops polling and raises a repair issue, so a wrong card code is not retried until the card gets locked. A captcha makes the next query wait (8 hours, doubling up to a day). Temporary portal outages are just logged.
+- **Portal errors are understood.** A card that never worked stops polling at the first rejection and raises a repair issue, so a wrong card code is not retried until the card gets locked. A card that worked before gets 3 rejections in a row first, because the portal sometimes rejects a working card after frequent queries. Captchas and rejections make the next query wait (8 hours, doubling up to a day). Temporary portal outages are just logged.
+- **Gentle on the portal.** At least 15 minutes between queries, and the query history is restored after a restart, so a burst of Home Assistant restarts sends one query, not one per restart.
 - **Safer handling of the card data.** An invalid `card_number` or `card_code` is reported in the log and as a repair issue without the value. Numbers are masked in logged responses, the unique ID only uses the last 4 digits of the card, and requests do not follow redirects.
 - **Proper sensor entities.** Monetary device class with long-term statistics, and a unique ID, so the sensors can be renamed in the UI.
 - **Defaults and limits.** Polling defaults to every 4 hours instead of 30 seconds, requests time out after 30 seconds, and responses are capped in size. No extra Python requirements.
@@ -75,7 +76,10 @@ The unique IDs are built from the last 4 digits of the card. After a card replac
 Attributes:
 
 - `last_success`: time of the last successful query.
+- `last_attempt`: time of the last query, successful or not.
 - `last_error`: the last error, cleared by the next successful query.
+- `not_before`: set while a captcha or card rejection makes the next query wait.
+- `polling_stopped`: `true` after the portal rejected the card for good (see the repair issue).
 - `stale`: `true` when there was no successful query in the last 48 hours. `last_success` is restored after a restart; `stale` is also `true` when no successful query is known at all.
 - `Egyenleg` (main sensor only): the balance as text, kept for compatibility with upstream.
 
@@ -91,6 +95,7 @@ All messages are logged under `custom_components.szep_kartya.sensor`:
 |---|---|
 | `Invalid configuration: ...` | `card_number` or `card_code` has the wrong format. Also shown as a repair issue. The sensors are not created until the config is fixed and Home Assistant is restarted. |
 | `Captcha protection kicked in ...; next query not before ...` | The portal was queried too often. The next query waits, no action needed unless it keeps happening. |
+| `The portal rejected the card (...), 1 of 3 in a row; ...` | The card worked before, so this is treated as temporary: the next query waits. Frequent queries (for example many restarts) can cause it. |
 | `The portal rejected the card (...); polling stopped until Home Assistant restarts` | Also shown as a repair issue. `hibas_kartyaszam_vagy_telekod`: check `card_number` and `card_code`. `letiltott_inaktiv_kartya`: the card is blocked or inactive. Fix the config, then restart. |
 | `The portal could not answer the balance query (...)` | Temporary problem on the portal side, e.g. `api_nem_elerheto`. Retried at the next polling round. |
 | `Unexpected balance response (HTTP ...)` | The portal answered with something the component does not know. The start of the response is logged, with long numbers masked. |
