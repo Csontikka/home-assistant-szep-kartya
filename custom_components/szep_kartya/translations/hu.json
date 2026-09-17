@@ -3,6 +3,10 @@
     "card_rejected": {
       "title": "SZÉP Kártya: a portál elutasította a kártyát",
       "description": "Az OTP portál ezzel utasította el az egyenleg-lekérdezést: `{reason}`. Az egyenleg lekérdezése leállt, így a rossz telekódot nem próbálja újra, és a kártya nem zárolódik.\n\nEllenőrizd a YAML-konfigban a `card_number` (mind a 16 számjegy) és a `card_code` értékét, majd indítsd újra a Home Assistantot."
+    },
+    "invalid_config": {
+      "title": "SZÉP Kártya: hibás konfiguráció",
+      "description": "A szenzor nem jött létre: {problems}.\n\nA `secrets.yaml`-ban mindkét értéket tedd idézőjelbe (például `\"0123\"`), különben a YAML számként olvassa, és elhagyja a kezdő nullákat. Utána indítsd újra a Home Assistantot. Az értékeket sem itt, sem a naplóban nem mutatjuk."
     }
   }
 }

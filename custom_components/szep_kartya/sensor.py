@@ -1,8 +1,8 @@
-import hashlib
 import json
 import logging
 import re
 import threading
+import time
 from datetime import timedelta
 
 import requests
@@ -11,8 +11,8 @@ import voluptuous as vol
 import homeassistant.helpers.config_validation as cv
 from homeassistant.components.sensor import (
     PLATFORM_SCHEMA,
+    RestoreSensor,
     SensorDeviceClass,
-    SensorEntity,
     SensorStateClass,
 )
 from homeassistant.const import CONF_NAME
@@ -37,6 +37,7 @@ SCAN_INTERVAL = timedelta(hours=4)
 URL_HTML = 'https://magan.szepkartya.otpportalok.hu/fooldal/'
 URL_API = 'https://magan.szepkartya.otpportalok.hu/ajax/gyorsegyenleg/'
 REQUEST_TIMEOUT = 30
+REQUEST_DEADLINE = 60
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 # Both sensors update in the same polling round; they share one query.
@@ -44,7 +45,7 @@ SHARED_RESULT_MAX_AGE = timedelta(minutes=5)
 # After a captcha the next query waits at least this long, doubling up to a day.
 CAPTCHA_BACKOFF_START = timedelta(hours=8)
 CAPTCHA_BACKOFF_MAX = timedelta(hours=24)
-# Keep the last balance through short outages; only go unavailable after this.
+# No successful query for this long sets the 'stale' attribute.
 STALE_AFTER = timedelta(hours=48)
 
 # 'HI' reasons that will not fix themselves. Retrying a rejected card code
@@ -63,26 +64,20 @@ POCKET_ACCOMMODATION = 'szamla_osszeg9'  # Szálláshely zseb
 POCKET_ACTIVE_HUNGARIANS = 'szamla_osszeg8'  # Aktív Magyarok zseb
 
 ISSUE_CARD_REJECTED = 'card_rejected'
+ISSUE_INVALID_CONFIG = 'invalid_config'
 
 
-def _digits(length):
-    """Validate a digit string without echoing the value.
-
-    Home Assistant logs the offending value of a failed schema check, which
-    would put the card number or card code into the log.
-    """
-    def validate(value):
-        text = str(value).strip()
-        if not (text.isdigit() and len(text) == length):
-            raise vol.Invalid(f'must be exactly {length} digits, quoted as a string (value not shown)')
-        return text
-    return validate
+def _as_text(value):
+    # Never fails: Home Assistant appends the offending value to every schema
+    # error it logs, which would put the card number or card code into the log.
+    # The format is checked in async_setup_platform instead.
+    return '' if value is None else str(value).strip()
 
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
-        vol.Required(CONF_CARD_NUMBER): _digits(16),
-        vol.Required(CONF_CARD_CODE): _digits(3),
+        vol.Required(CONF_CARD_NUMBER): _as_text,
+        vol.Required(CONF_CARD_CODE): _as_text,
         vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
     }
 )
@@ -90,10 +85,31 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
 
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
     card_number = config[CONF_CARD_NUMBER]
+    card_code = config[CONF_CARD_CODE]
     name = config[CONF_NAME]
-    card_id = hashlib.sha256(card_number.encode()).hexdigest()[:12]
 
-    client = SzepKartyaClient(hass, card_number, config[CONF_CARD_CODE], card_id)
+    problems = []
+    if not (card_number.isdigit() and len(card_number) == 16):
+        problems.append('card_number must be exactly 16 digits')
+    if not (card_code.isdigit() and len(card_code) == 3):
+        problems.append('card_code must be exactly 3 digits')
+    if problems:
+        _LOGGER.error('Invalid configuration: %s. Quote the values in secrets.yaml '
+                      'so leading zeroes are kept. (Values not shown.)', '; '.join(problems))
+        ir.async_create_issue(
+            hass, DOMAIN, ISSUE_INVALID_CONFIG,
+            is_fixable=False,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key=ISSUE_INVALID_CONFIG,
+            translation_placeholders={'problems': '; '.join(problems)},
+        )
+        return
+    ir.async_delete_issue(hass, DOMAIN, ISSUE_INVALID_CONFIG)
+
+    # The last 4 digits are what cards show publicly. A hash of the whole
+    # number could be brute forced from the entity registry.
+    card_id = card_number[-4:]
+    client = SzepKartyaClient(hass, card_number, card_code, card_id)
     sensors = [
         SzepKartyaSensor(client, name, f'{card_id}_szallashely', POCKET_ACCOMMODATION, primary=True),
         SzepKartyaSensor(client, f'{name} Aktív Magyarok', f'{card_id}_aktiv_magyarok', POCKET_ACTIVE_HUNGARIANS),
@@ -105,15 +121,17 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
 
 
 def parse_balance(input_string) -> int:
-    text = str(input_string).strip()
+    if not isinstance(input_string, str):
+        raise ValueError(f'balance is not a string: {type(input_string).__name__}')
+    text = input_string.strip()
     if text == '':
         return 0
     return int(text.replace('+', ''))
 
 
 def _masked(text: str) -> str:
-    """Start of a response body for the log, with long digit runs hidden."""
-    return re.sub(r'\d{6,}', '<num>', text[:200])
+    """Start of a response body for the log, with numbers hidden."""
+    return re.sub(r'\d(?:[\d \-]*\d){2,}', '<num>', text[:200])
 
 
 class SzepKartyaClient:
@@ -141,7 +159,9 @@ class SzepKartyaClient:
                 return
             if self.last_attempt and now - self.last_attempt < SHARED_RESULT_MAX_AGE:
                 return
-            if self._not_before and now < self._not_before:
+            # Polling rounds arrive at about the backoff length; do not skip a
+            # round over a few seconds of scheduling jitter.
+            if self._not_before and now + SHARED_RESULT_MAX_AGE < self._not_before:
                 _LOGGER.debug('Skipping balance query until %s (captcha backoff)', self._not_before)
                 return
             self.last_attempt = now
@@ -155,9 +175,11 @@ class SzepKartyaClient:
         _LOGGER.error(message)
 
     def _query(self, now):
+        deadline = time.monotonic() + REQUEST_DEADLINE
         with requests.Session() as session:
-            html = self._get_text(session.get(URL_HTML, timeout=REQUEST_TIMEOUT,
-                                              allow_redirects=False, stream=True))
+            with session.get(URL_HTML, timeout=REQUEST_TIMEOUT,
+                             allow_redirects=False, stream=True) as response:
+                html = self._get_text(response, deadline)
             match = re.search(r"ajax_token = '([a-z0-9]{64})'", html)
             if not match:
                 raise ValueError("Can't find ajax_token on the portal page")
@@ -168,19 +190,20 @@ class SzepKartyaClient:
                 'ajax_token': match.group(1),
                 's_captcha': '',
             }
-            response = session.post(URL_API, data=data, timeout=REQUEST_TIMEOUT,
-                                    allow_redirects=False, stream=True)
-            text = self._get_text(response)
+            with session.post(URL_API, data=data, timeout=REQUEST_TIMEOUT,
+                              allow_redirects=False, stream=True) as response:
+                status = response.status_code
+                text = self._get_text(response, deadline)
 
         try:
             payload = json.loads(text)
         except ValueError:
-            self._fail(f'Unexpected balance response (HTTP {response.status_code}): {_masked(text)}')
+            self._fail(f'Unexpected balance response (HTTP {status}): {_masked(text)}')
             return
-        self._handle(payload, response.status_code, text, now)
+        self._handle(payload, status, text, now)
 
     @staticmethod
-    def _get_text(response) -> str:
+    def _get_text(response, deadline) -> str:
         if response.status_code != 200:
             raise ValueError(f'HTTP {response.status_code} from {response.url}')
         body = bytearray()
@@ -188,6 +211,8 @@ class SzepKartyaClient:
             body.extend(chunk)
             if len(body) > MAX_RESPONSE_BYTES:
                 raise ValueError('Portal response too large')
+            if time.monotonic() > deadline:
+                raise ValueError('Portal response too slow')
         return body.decode(response.encoding or 'utf-8', errors='replace')
 
     def _handle(self, payload, status, text, now):
@@ -204,10 +229,15 @@ class SzepKartyaClient:
         reason = message if isinstance(message, str) else None
 
         if result == 'OK' and isinstance(message, dict):
-            self.balances = {
-                key: parse_balance(message.get(key, ''))
-                for key in (POCKET_ACCOMMODATION, POCKET_ACTIVE_HUNGARIANS)
-            }
+            if POCKET_ACCOMMODATION not in message:
+                # A missing field must not read as a zero balance.
+                self._fail(f'Balance response without {POCKET_ACCOMMODATION}: '
+                           f'fields {sorted(message)}')
+                return
+            balances = {POCKET_ACCOMMODATION: parse_balance(message[POCKET_ACCOMMODATION])}
+            if POCKET_ACTIVE_HUNGARIANS in message:
+                balances[POCKET_ACTIVE_HUNGARIANS] = parse_balance(message[POCKET_ACTIVE_HUNGARIANS])
+            self.balances = balances
             self.last_success = now
             self.last_error = None
             self._not_before = None
@@ -244,7 +274,7 @@ class SzepKartyaClient:
         self._fail(f'Unexpected balance response (HTTP {status}): {_masked(text)}')
 
 
-class SzepKartyaSensor(SensorEntity):
+class SzepKartyaSensor(RestoreSensor):
     _attr_device_class = SensorDeviceClass.MONETARY
     _attr_state_class = SensorStateClass.TOTAL
     _attr_native_unit_of_measurement = DEFAULT_UNIT
@@ -258,6 +288,26 @@ class SzepKartyaSensor(SensorEntity):
         self._primary = primary
         self._attr_name = name
         self._attr_unique_id = unique_id
+        self._attr_native_value = None
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        # A failed first query after a restart keeps the last known balance, so
+        # automations comparing old and new states do not see unknown -> value.
+        if self._attr_native_value is None:
+            last = await self.async_get_last_sensor_data()
+            if last is not None and last.native_value is not None:
+                try:
+                    self._attr_native_value = int(last.native_value)
+                except (TypeError, ValueError):
+                    pass
+        if self._client.last_success is None:
+            last_state = await self.async_get_last_state()
+            if last_state is not None:
+                restored = dt_util.parse_datetime(str(last_state.attributes.get('last_success') or ''))
+                if restored is not None:
+                    self._client.last_success = restored
+        self._update_attributes()
 
     def update(self):
         # Never raise: an exception in the first update makes HA drop the entity.
@@ -266,20 +316,21 @@ class SzepKartyaSensor(SensorEntity):
         except Exception as err:
             _LOGGER.error('Balance update failed: %r', err)
 
-        client = self._client
-        self._attr_native_value = client.balances.get(self._pocket)
-        # Short outages keep the last balance, so automations that compare
-        # old and new states do not see a fake drop to unavailable and back.
-        self._attr_available = not (
-            client.last_success is None and client.stopped
-        ) and not (
-            client.last_success is not None
-            and dt_util.utcnow() - client.last_success > STALE_AFTER
-        )
+        value = self._client.balances.get(self._pocket)
+        if value is not None:
+            self._attr_native_value = value
+        self._update_attributes()
 
+    def _update_attributes(self):
+        client = self._client
+        # A failed query keeps the last balance: going unavailable and back would
+        # read as spending and top-up to automations that compare states.
+        self._attr_available = not (client.stopped and self._attr_native_value is None)
+        stale = client.last_success is None or dt_util.utcnow() - client.last_success > STALE_AFTER
         attributes = {
             'last_success': client.last_success.isoformat() if client.last_success else None,
             'last_error': client.last_error,
+            'stale': stale,
         }
         if self._primary:
             attributes['Egyenleg'] = f'{self._attr_native_value} {DEFAULT_UNIT}'

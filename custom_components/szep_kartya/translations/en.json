@@ -3,6 +3,10 @@
     "card_rejected": {
       "title": "SZÉP Kártya: the portal rejected the card",
       "description": "The OTP portal rejected the balance query with `{reason}`. Balance polling has stopped, so a wrong card code is not retried and the card is not locked.\n\nCheck `card_number` (all 16 digits) and `card_code` in your YAML configuration and restart Home Assistant."
+    },
+    "invalid_config": {
+      "title": "SZÉP Kártya: invalid configuration",
+      "description": "The sensor was not set up: {problems}.\n\nQuote both values in `secrets.yaml` (for example `\"0123\"`), otherwise YAML reads them as numbers and drops leading zeroes. Then restart Home Assistant. The values themselves are not shown here or in the log."
     }
   }
 }
