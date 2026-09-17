@@ -1,11 +1,12 @@
 {
   "domain": "szep_kartya",
   "name": "SZÉP Kártya",
-  "version": "1.1",
-  "documentation": "https://github.com/ofalvai/home-assistant-szep-kartya",
-  "issue_tracker": "https://github.com/ofalvai/home-assistant-szep-kartya/issues",
+  "version": "1.1.1",
+  "documentation": "https://github.com/Csontikka/home-assistant-szep-kartya",
+  "issue_tracker": "https://github.com/Csontikka/home-assistant-szep-kartya/issues",
   "dependencies": [],
-  "codeowners": ["@ofalvai"],
+  "codeowners": ["@ofalvai", "@Csontikka"],
+  "iot_class": "cloud_polling",
   "requirements": [
     "beautifulsoup4",
     "requests"

@@ -4,6 +4,8 @@
 
 Custom component for [Home Assistant](https://home-assistant.io) that tracks SZÉP Kártya account balance.
 
+This is a fork of [ofalvai/home-assistant-szep-kartya](https://github.com/ofalvai/home-assistant-szep-kartya). It follows the OTP portal's quick balance endpoint and keeps the sensor alive when a balance query fails.
+
 The state of the sensor is the sum of all sub-balances, but each sub-balance is exposed as a property.
 
 ![Screenshot](screenshot.png?raw=true)
@@ -11,7 +13,7 @@ The state of the sensor is the sum of all sub-balances, but each sub-balance is 
 ## Installation
 
 1. Install [HACS](https://hacs.xyz/)
-2. Add this as a custom repository to HACS (`https://github.com/ofalvai/home-assistant-szep-kartya`)
+2. Add this as a custom repository to HACS (`https://github.com/Csontikka/home-assistant-szep-kartya`)
 3. Install from the integrations list
 4. Add YAML config to `configuration.yaml` (see below)
 5. Restart Home Assistant
@@ -28,7 +30,7 @@ sensor:
       hours: 4
 ```
 
-`card_number`: The last 8 digits of the card number (after the `61013242` prefix). Make sure to represent the number as string to avoid removing zeroes from the beginning.
+`card_number`: The full 16-digit card number. Make sure to represent the number as string to avoid removing zeroes from the beginning.
 
 `card_code`: "Telekód" (by default the last 3 digits of card number). Make sure to represent the number as string to avoid removing zeroes from the beginning.
 
