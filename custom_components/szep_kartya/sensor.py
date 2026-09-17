@@ -35,18 +35,20 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
 
 URL_API = 'https://magan.szepkartya.otpportalok.hu/ajax/gyorsegyenleg/'
 URL_HTML = 'https://magan.szepkartya.otpportalok.hu/fooldal/'
+REQUEST_TIMEOUT = 30
 
 
-def setup_platform(hass, config, add_entities, discovery_info=None):
+async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
     card_number = config.get(CONF_CARD_NUMBER)
     card_code = config.get(CONF_CARD_CODE)
     main_balance = config.get(CONF_MAIN_BALANCE)
     name = config.get(CONF_NAME)
 
     sensor = SzepKartyaSensor(card_number, card_code, main_balance, name)
-    sensor.update()
 
-    add_entities([sensor])
+    # Add the entity first and let HA run the first update. A failed fetch
+    # used to abort platform setup, and HA never retries that.
+    async_add_entities([sensor], True)
 
 
 class SzepKartyaSensor(Entity):
@@ -85,14 +87,22 @@ class SzepKartyaSensor(Entity):
         return DEFAULT_ICON
 
     def update(self):
-        self.scrape_tokens()
-        self.fetch_balance()
+        # Never raise: an exception in the first update makes HA drop the
+        # entity. On failure the previous balance is kept.
+        try:
+            self.scrape_tokens()
+            self.fetch_balance()
+        except Exception as err:
+            _LOGGER.error('Balance update failed: %r', err)
         self._state = self.balance
 
     def scrape_tokens(self):
-        response_html = requests.get(URL_HTML)
+        response_html = requests.get(URL_HTML, timeout=REQUEST_TIMEOUT)
         soup = bs(response_html.text, 'html.parser')
-        script_tag_text = soup.find('script', text=re.compile('ajax_token')).string
+        script_tag = soup.find('script', string=re.compile('ajax_token'))
+        if script_tag is None:
+            raise ValueError('Can\'t find the ajax_token script tag (HTTP %s)' % response_html.status_code)
+        script_tag_text = script_tag.string
 
         match = re.search(r'ajax_token = \'([a-z0-9]{64})\'', script_tag_text)
         if not match:
@@ -107,15 +117,20 @@ class SzepKartyaSensor(Entity):
         headers = {
             'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
         }
-        response_api = requests.post(URL_API, headers=headers, data=request_body, cookies=cookies)
+        response_api = requests.post(URL_API, headers=headers, data=request_body, cookies=cookies,
+                                     timeout=REQUEST_TIMEOUT)
 
         response_json = json.loads(response_api.text)
-        if response_json[0] == 'RC':
+        first = response_json[0] if isinstance(response_json, list) and response_json else response_json
+        if first == 'RC':
             _LOGGER.error('Captcha protection kicked in (too many requests)')
-        elif response_json[0] == 'HI':
+        elif first == 'HI':
             _LOGGER.error('Wrong card number or card code')
+        elif isinstance(first, dict) and isinstance(first.get('UZENET'), dict):
+            self.balance = parse_balance(first['UZENET']['szamla_osszeg9'])
         else:
-            self.balance = parse_balance(response_json[0]['UZENET']['szamla_osszeg9'])
+            _LOGGER.error('Unexpected balance response (HTTP %s): %.200s',
+                          response_api.status_code, response_api.text)
 
 def parse_balance(input_string: str) -> int:
     if input_string.strip() == '':
