@@ -1,0 +1,8 @@
+{
+  "issues": {
+    "card_rejected": {
+      "title": "SZÉP Kártya: the portal rejected the card",
+      "description": "The OTP portal rejected the balance query with `{reason}`. Balance polling has stopped, so a wrong card code is not retried and the card is not locked.\n\nCheck `card_number` (all 16 digits) and `card_code` in your YAML configuration and restart Home Assistant."
+    }
+  }
+}
