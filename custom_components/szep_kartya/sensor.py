@@ -311,7 +311,9 @@ class SzepKartyaClient:
     def restore(self, attributes, now):
         """Take over the query history saved in a sensor's last state."""
         def when(key):
-            return dt_util.parse_datetime(str(attributes.get(key) or ''))
+            value = dt_util.parse_datetime(str(attributes.get(key) or ''))
+            # Only aware times can be compared with now; ours always carry +00:00.
+            return value if value is not None and value.tzinfo is not None else None
 
         if self.last_success is None:
             restored = when('last_success')
