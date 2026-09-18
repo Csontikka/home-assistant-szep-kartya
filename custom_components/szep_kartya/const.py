@@ -14,6 +14,11 @@ DEFAULT_SCAN_HOURS = 4
 MIN_SCAN_HOURS = 1
 MAX_SCAN_HOURS = 24
 
+# Every round starts up to this much earlier or later, so the portal does not
+# see a request at the same second every day and two Home Assistants querying
+# the same card cannot drift into lockstep.
+POLL_JITTER = timedelta(minutes=10)
+
 # Minimum gap between two queries of the same card. A burst of Home Assistant
 # restarts sends only one query, because the last attempt is stored.
 MIN_QUERY_GAP = timedelta(minutes=15)

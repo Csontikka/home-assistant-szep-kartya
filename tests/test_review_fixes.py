@@ -174,3 +174,32 @@ async def test_query_of_a_removed_entry_records_nothing(hass: HomeAssistant, por
     await hass.async_block_till_done()
     assert f'{DOMAIN}.{entry.entry_id}' not in hass_storage
     assert hass.config_entries.flow.async_progress_by_handler(DOMAIN) == []
+
+
+async def test_rounds_are_spread_by_a_few_minutes(hass: HomeAssistant, portal_mock) -> None:
+    from custom_components.szep_kartya.const import MIN_QUERY_GAP, POLL_JITTER
+    entry = _entry(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator = entry.runtime_data
+    base = timedelta(hours=4)
+    seen = set()
+    for _ in range(50):
+        coordinator._schedule_refresh()
+        interval = coordinator.update_interval
+        assert base - POLL_JITTER <= interval <= base + POLL_JITTER
+        assert interval >= MIN_QUERY_GAP
+        seen.add(interval)
+    assert len(seen) > 40, 'every round gets its own offset'
+
+
+async def test_a_short_interval_never_goes_under_the_minimum_gap(hass: HomeAssistant, portal_mock) -> None:
+    from custom_components.szep_kartya.const import MIN_QUERY_GAP
+    entry = MockConfigEntry(domain=DOMAIN, title='Gábor', unique_id=CARD,
+                            data={'card_number': CARD, 'card_code': CODE}, options={'scan_hours': 1})
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    for _ in range(50):
+        entry.runtime_data._schedule_refresh()
+        assert entry.runtime_data.update_interval >= MIN_QUERY_GAP

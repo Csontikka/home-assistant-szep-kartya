@@ -45,6 +45,7 @@ A portál a sűrű lekérdezésre captchával válaszol, és ilyenkor működő 
 
 - Egy kártyát legfeljebb 15 percenként kérdezünk le. A kísérletet még a lekérdezés előtt elmentjük, így egy újraindítás-sorozat egyetlen lekérdezés, akkor is, ha az újraindítás épp lekérdezés közben jön. A 15 percen belüli kézi frissítés nem csinál semmit.
 - A kártyák lekérdezései sorban mennek, köztük legalább 1 perc szünettel.
+- Minden kör ±10 percet csúszik véletlenszerűen, így a portál nem másodpercre ugyanakkor kapja a kérést minden nap, és két Home Assistant sem sodródhat egymásra.
 - Captcha után a következő lekérdezés vár: 8 óra, ismétlődésnél duplázódva legfeljebb 24 óra. Ez **minden kártyára** vonatkozik, mert a korlát a közös IP-címet éri.
 - Egy sikertelen lekérdezés nem nullázza az egyenleget, és nem teszi elérhetetlenné a szenzort. Az automatizmusok így nem látnak hamis költést vagy jóváírást.
 

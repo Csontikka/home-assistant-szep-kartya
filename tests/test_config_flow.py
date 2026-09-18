@@ -101,7 +101,10 @@ async def test_options_change_interval(hass: HomeAssistant, portal_mock) -> None
     result = await hass.config_entries.options.async_configure(result['flow_id'], {'scan_hours': 12})
     await hass.async_block_till_done()
     assert result['type'] is FlowResultType.CREATE_ENTRY
-    assert entry.runtime_data.update_interval.total_seconds() == 12 * 3600
+    from datetime import timedelta
+    from custom_components.szep_kartya.const import POLL_JITTER
+    assert entry.runtime_data._interval == timedelta(hours=12)
+    assert abs(entry.runtime_data.update_interval - timedelta(hours=12)) <= POLL_JITTER
 
 
 async def test_import_flow_keeps_scan_interval(hass: HomeAssistant, portal_mock) -> None:

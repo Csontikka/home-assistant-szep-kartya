@@ -37,7 +37,8 @@ def _entity_id(hass, unique_id, domain='sensor'):
 
 
 async def _poll(hass, freezer, hours):
-    freezer.tick(timedelta(hours=hours))
+    # A round may be scheduled up to POLL_JITTER late, so step past that.
+    freezer.tick(timedelta(hours=hours, minutes=11))
     async_fire_time_changed(hass)
     await hass.async_block_till_done()
 

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.restore_state import async_get as async_get_restore_state
 from homeassistant.helpers.storage import Store
@@ -28,6 +29,7 @@ from .const import (
     GLOBAL_QUERY_GAP_SECONDS,
     MIN_QUERY_GAP,
     POCKET_ACCOMMODATION,
+    POLL_JITTER,
     POCKET_ACTIVE_HUNGARIANS,
     REJECTION_LIMIT,
     STALE_AFTER,
@@ -187,18 +189,28 @@ class SzepKartyaCoordinator(DataUpdateCoordinator[CardState]):
     config_entry: ConfigEntry
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
-        hours = entry.options.get(CONF_SCAN_HOURS, DEFAULT_SCAN_HOURS)
+        self._interval = timedelta(hours=entry.options.get(CONF_SCAN_HOURS, DEFAULT_SCAN_HOURS))
         super().__init__(
             hass,
             _LOGGER,
             config_entry=entry,
             name=f'{DOMAIN} {entry.title}',
-            update_interval=timedelta(hours=hours),
+            update_interval=self._jittered(),
         )
         self._card_number: str = entry.data[CONF_CARD_NUMBER]
         self._card_code: str = entry.data[CONF_CARD_CODE]
         self._store = _store(hass, entry.entry_id)
         self.card_id = card_id(self._card_number)
+
+    def _jittered(self) -> timedelta:
+        offset = random.uniform(-POLL_JITTER.total_seconds(), POLL_JITTER.total_seconds())
+        return max(MIN_QUERY_GAP, self._interval + timedelta(seconds=offset))
+
+    @callback
+    def _schedule_refresh(self) -> None:
+        # Pick a new offset for every round, not once per restart.
+        self.update_interval = self._jittered()
+        super()._schedule_refresh()
 
     async def async_load(self) -> None:
         now = dt_util.utcnow()
